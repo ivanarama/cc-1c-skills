@@ -121,6 +121,7 @@ Switch-параметры (`-NoValidate`) → `action='store_true'`.
 - `lxml>=4.9.0` — ~25 DOM-скриптов
 - `Pillow>=10.0.0` — `/img-grid`
 - `psutil>=5.9.0` — 4 web-скрипта
+- `pywin32>=306` — `/db-query` через COMConnector (только Windows)
 
 ## Работа с BOM (UTF-8)
 

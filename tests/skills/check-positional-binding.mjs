@@ -54,8 +54,9 @@ if (runtimes.length === 0) {
 const PY = process.env.PYTHON || (IS_WIN ? 'python' : 'python3');
 
 // Семья read-only навыков определяется по имени, а не списком: новый *-info/*-validate
-// попадает под гард сам, без правки этого файла.
-const isReadOnly = name => /-(info|validate)$/.test(name) || name === 'cfe-diff';
+// попадает под гард сам, без правки этого файла. Исключения перечислены явно, когда имя
+// описывает операцию чтения без общего суффикса.
+const isReadOnly = name => /-(info|validate)$/.test(name) || ['cfe-diff', 'db-query'].includes(name);
 
 const skills = readdirSync(SKILLS_DIR)
   .filter(isReadOnly)
