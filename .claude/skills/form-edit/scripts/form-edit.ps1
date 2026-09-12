@@ -1030,7 +1030,7 @@ function Insert-IntoContainer($container, $newNode, $afterName, $childIndent) {
 
 # === 9. Generate fragment, parse, import nodes ===
 
-$allNsDecl = 'xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings" xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema"'
+$allNsDecl = 'xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:dcsset="http://v8.1c.ru/8.1/data-composition-system/settings" xmlns:dcscor="http://v8.1c.ru/8.1/data-composition-system/core" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema"'
 
 function Parse-Fragment([string]$xmlText) {
 	$fragDoc = New-Object System.Xml.XmlDocument
@@ -1071,6 +1071,10 @@ if ($def.elements -and $def.elements.Count -gt 0) {
 			# Create ChildItems for the group
 			$targetCI = $xmlDoc.CreateElement("ChildItems", $formNs)
 			$targetGroup.AppendChild($targetCI) | Out-Null
+		}
+		$targetOrientation = $targetGroup.SelectSingleNode("f:Group", $nsMgr)
+		if ($targetOrientation -and $targetOrientation.InnerText -match 'Horizontal') {
+			Write-Host "[WARN] Target '$intoName' is horizontal: added siblings will be placed side-by-side. For a bottom panel use root-level 'after'." -ForegroundColor Yellow
 		}
 	} elseif ($afterName) {
 		# Find the after element globally and use its parent as target
@@ -1235,6 +1239,37 @@ if ($def.attributes -and $def.attributes.Count -gt 0) {
 
 		if ($attr.title) { Emit-MLText -tag "Title" -text "$($attr.title)" -indent $inner }
 		if ($attr.type) { Emit-Type -typeStr "$($attr.type)" -indent $inner } else { X "$inner<Type/>" }
+		if ($attr.type -eq 'DynamicList' -and $attr.settings) {
+			$st = $attr.settings
+			X "$inner<Settings xsi:type=`"DynamicList`">"
+			$si = "$inner`t"
+			$hasQuery = $st.query -and "$($st.query)".Trim()
+			X "$si<ManualQuery>$(if ($hasQuery) {'true'} else {'false'})</ManualQuery>"
+			X "$si<DynamicDataRead>$(if ($st.dynamicDataRead -eq $false) {'false'} else {'true'})</DynamicDataRead>"
+			if ($hasQuery) {
+				$qtext = "$($st.query)"
+				if ($qtext.StartsWith('@')) { $qtext = Get-Content -LiteralPath (Join-Path (Split-Path (Resolve-Path $JsonPath).Path -Parent) $qtext.Substring(1)) -Raw -Encoding UTF8 }
+				$pipeLines = @($qtext -split "`r?`n" | Where-Object { $_ -match '^\s*\|' })
+				if ($pipeLines.Count -gt 0) {
+					$qtext = (($qtext -split "`r?`n") | ForEach-Object { $_ -replace '^(\s*)\|\s?', '$1' }) -join "`n"
+					Write-Host "[WARN] DynamicList '$attrName': removed BSL string-literal '|' prefixes from query text." -ForegroundColor Yellow
+				}
+				X "$si<QueryText>$(Esc-XmlText $qtext)</QueryText>"
+			}
+			foreach ($fld in @($st.fields)) {
+				if (-not $fld) { continue }
+				$fieldName = if ($fld -is [string]) { "$fld" } else { "$($fld.field)" }
+				$dp = if ($fld -isnot [string] -and $null -ne $fld.dataPath) { "$($fld.dataPath)" } else { $fieldName }
+				X "$si<Field xsi:type=`"dcssch:DataSetFieldField`">"
+				X "$si`t<dcssch:dataPath>$(Esc-XmlText $dp)</dcssch:dataPath>"
+				X "$si`t<dcssch:field>$(Esc-XmlText $fieldName)</dcssch:field>"
+				X "$si</Field>"
+			}
+			if ($st.keyType) { X "$si<KeyType>$(Esc-XmlText "$($st.keyType)")</KeyType>" }
+			foreach ($kf in @($st.keyFields)) { if ($kf) { X "$si<KeyField>$(Esc-XmlText "$kf")</KeyField>" } }
+			if ($st.mainTable) { X "$si<MainTable>$(Esc-XmlText "$($st.mainTable)")</MainTable>" }
+			X "$inner</Settings>"
+		}
 		if ($attr.main -eq $true) { X "$inner<MainAttribute>true</MainAttribute>" }
 		if ($attr.savedData -eq $true) { X "$inner<SavedData>true</SavedData>" }
 		if ($attr.fillChecking) { X "$inner<FillChecking>$($attr.fillChecking)</FillChecking>" }

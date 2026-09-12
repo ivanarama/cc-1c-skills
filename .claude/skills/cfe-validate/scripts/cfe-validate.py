@@ -919,6 +919,20 @@ def main():
         with open(form_xml_file, 'r', encoding='utf-8-sig') as f:
             form_raw_text = f.read()
 
+        for match in re.finditer(r'<Settings\s+xsi:type="DynamicList"[^>]*>(.*?)</Settings>', form_raw_text, re.S):
+            body = match.group(1)
+            query_match = re.search(r'<QueryText>(.*?)</QueryText>', body, re.S)
+            if query_match and re.search(r'^\s*\|', query_match.group(1), re.M):
+                r.error(f"11. {ctx}: DynamicList QueryText contains BSL string-literal '|' prefixes")
+                check11_ok = False
+            if '<ManualQuery>true</ManualQuery>' in body and '<MainTable>' not in body and '<KeyType>' not in body:
+                r.error(f'11. {ctx}: manual DynamicList without MainTable needs KeyType/KeyField')
+                check11_ok = False
+            if ('<ManualQuery>true</ManualQuery>' in body and
+                    re.search(r'<MainTable>AccumulationRegister\.[^<]+\.Balance</MainTable>', body)):
+                r.warn(f'11. {ctx}: virtual accumulation-register table is used as MainTable; '
+                       'prefer query + RowKey/KeyField and no MainTable for an added list')
+
         if '<BaseForm' in form_raw_text:
             if not re.search(r'<BaseForm[^>]+version=', form_raw_text):
                 r.warn(f'11. {ctx}: <BaseForm> missing version attribute')
@@ -1272,10 +1286,13 @@ def main():
         for fn in files:
             if fn.endswith('.bsl'):
                 try:
-                    with open(os.path.join(dp, fn), 'r', encoding='utf-8-sig') as f:
-                        for ln in f:
-                            if re.match(r'^\s*&ИзменениеИКонтроль\(', ln):
-                                ctrl_count += 1
+                    bsl_path = os.path.join(dp, fn)
+                    with open(bsl_path, 'r', encoding='utf-8-sig') as f:
+                        bsl_text = f.read()
+                    ctrl_count += len(re.findall(r'^\s*&ИзменениеИКонтроль\(', bsl_text, re.M))
+                    if re.search(r'\b(?:Список|ДинамическийСписок)\w*\.ТекущаяСтрока\b', bsl_text, re.I):
+                        relative_bsl = os.path.relpath(bsl_path, config_dir)
+                        r.warn(f'17. {relative_bsl}: suspicious DynamicList.ТекущаяСтрока; use form table element .ТекущиеДанные or verify the runtime type')
                 except OSError:
                     pass
     if ctrl_count > 0:

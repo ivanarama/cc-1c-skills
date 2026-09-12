@@ -82,6 +82,24 @@ param(
     [string]$URL,
 
     [Parameter(Mandatory=$false)]
+    [ValidateSet("Thick", "Thin")]
+    [string]$Client = "Thick",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$Visible,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$SingleInstance,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(0, 3600)]
+    [int]$WaitReadySeconds = 0,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(0, 300)]
+    [int]$ReadyGraceSeconds = 30,
+
+    [Parameter(Mandatory=$false)]
     [string[]]$AdditionalV8Arguments = @(),
 
     [Parameter(Mandatory=$false)]
@@ -305,6 +323,16 @@ if (-not (Test-Path $V8Path)) {
     exit 1
 }
 
+$launchExe = $V8Path
+if ($Client -eq 'Thin') {
+    $thinName = if ([System.IO.Path]::GetExtension($V8Path)) { '1cv8c.exe' } else { '1cv8c' }
+    $launchExe = Join-Path (Split-Path $V8Path -Parent) $thinName
+    if (-not (Test-Path $launchExe)) {
+        Write-Host "Error: thin client executable not found at $launchExe" -ForegroundColor Red
+        exit 1
+    }
+}
+
 # --- Resolve additional arguments ---
 # 1C:Enterprise is always launched by 1cv8 — ibcmd has no interactive mode.
 $engine = "1cv8"
@@ -359,7 +387,7 @@ if ($URL) {
     $argString += " /URL `"$URL`""
 }
 
-$argString += " /DisableStartupDialogs"
+if (-not $Visible) { $argString += " /DisableStartupDialogs" }
 
 # The display string is built from the same tokens with secret-prone values redacted.
 $displayString = $argString
@@ -369,8 +397,20 @@ foreach ($tok in (Format-ArgsForDisplay $extraArgs $engine)) { $displayString +=
 # --- Execute (background) ---
 # Redact the password/user before printing the command line — never leak secrets.
 $displayArg = Protect-Secrets $displayString @($Password, $UserName)
-Write-Host "Running: 1cv8.exe $displayArg"
-$proc = Start-Process -FilePath $V8Path -ArgumentList $argString -PassThru
+$runningOnWindows = $env:OS -eq 'Windows_NT'
+if ($SingleInstance -and $runningOnWindows) {
+    $needle = if ($InfoBasePath) { $InfoBasePath } else { "$InfoBaseServer/$InfoBaseRef" }
+    $existing = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @('1cv8.exe','1cv8c.exe') -and $_.CommandLine -and $_.CommandLine.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }
+    if ($existing) {
+        Write-Host "Error: 1C client for this infobase is already running (PID: $(($existing.ProcessId -join ', ')))" -ForegroundColor Red
+        exit 2
+    }
+}
+Write-Host "Running: $([System.IO.Path]::GetFileName($launchExe)) $displayArg"
+$startArgs = @{ FilePath = $launchExe; ArgumentList = $argString; PassThru = $true }
+if ($Visible) { $startArgs.WindowStyle = 'Normal' }
+$proc = Start-Process @startArgs
 
 # --- Bounded early-exit check ---
 # The launch is a background GUI process, so we don't wait for completion. But a process
@@ -385,4 +425,34 @@ if ($proc.HasExited) {
     if ($proc.ExitCode -ne 0) { exit $proc.ExitCode } else { exit 1 }
 }
 Write-Host "PID: $($proc.Id)"
-Write-Host "1C:Enterprise launched" -ForegroundColor Green
+if ($WaitReadySeconds -gt 0) {
+    $readyDeadline = (Get-Date).AddSeconds($WaitReadySeconds)
+    do {
+        Start-Sleep -Milliseconds 500
+        $proc.Refresh()
+        if ($proc.HasExited) {
+            Write-Host "Error: 1C:Enterprise exited before becoming ready (code: $($proc.ExitCode))" -ForegroundColor Red
+            exit $(if ($proc.ExitCode) { $proc.ExitCode } else { 1 })
+        }
+        $title = $proc.MainWindowTitle
+        $ready = $proc.MainWindowHandle -ne 0 -and $proc.Responding -and $title -and $title -notmatch 'Загрузка конфигурационной информации|Loading configuration information'
+    } while (-not $ready -and (Get-Date) -lt $readyDeadline)
+    if (-not $ready -and $ReadyGraceSeconds -gt 0 -and $title -and $title -notmatch 'Загрузка конфигурационной информации|Loading configuration information') {
+        Write-Host "[WARN] Normal application title appeared near timeout; waiting $ReadyGraceSeconds extra seconds for the window to respond." -ForegroundColor Yellow
+        $graceDeadline = (Get-Date).AddSeconds($ReadyGraceSeconds)
+        do {
+            Start-Sleep -Milliseconds 500
+            $proc.Refresh()
+            if ($proc.HasExited) { break }
+            $title = $proc.MainWindowTitle
+            $ready = $proc.MainWindowHandle -ne 0 -and $proc.Responding -and $title
+        } while (-not $ready -and (Get-Date) -lt $graceDeadline)
+    }
+    if (-not $ready) {
+        Write-Host "Error: client did not become ready within $WaitReadySeconds seconds (PID: $($proc.Id), title: '$title')" -ForegroundColor Red
+        exit 3
+    }
+    Write-Host "1C:Enterprise ready: $title" -ForegroundColor Green
+} else {
+    Write-Host "1C:Enterprise launched" -ForegroundColor Green
+}

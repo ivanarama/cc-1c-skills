@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # Общий блок группы db-*: реквизиты хранилища, дополнительные аргументы, запуск платформы.
 # Копии держит одинаковыми tests/skills/check-inline-drift.mjs — правку вносить в навык-эталон.
@@ -598,6 +599,7 @@ def main():
     )
     parser.add_argument("-Command", default="")
     parser.add_argument("-V8Path", default="")
+    parser.add_argument("-IbcmdPath", default="")
     parser.add_argument("-InfoBasePath", default="")
     parser.add_argument("-InfoBaseServer", default="")
     parser.add_argument("-InfoBaseRef", default="")
@@ -626,6 +628,7 @@ def main():
     args = ci_parse_args(parser, argv)
 
     args.V8Path = clean_path(args.V8Path, "-V8Path")
+    args.IbcmdPath = clean_path(args.IbcmdPath, "-IbcmdPath")
     args.InfoBasePath = clean_path(args.InfoBasePath, "-InfoBasePath")
     assert_infobase_exists(args.InfoBasePath)
 
@@ -637,14 +640,33 @@ def main():
     leaf = os.path.basename(v8path)
     # Расширение файла сохраняем: на Windows это .exe, на *nix его нет, в тестах — .cmd/.sh.
     suffix = os.path.splitext(leaf)[1]
-    if leaf.lower().startswith("ibcmd"):
+    if args.IbcmdPath:
+        v8_exe = v8path
+        ibcmd_exe = args.IbcmdPath
+    elif leaf.lower().startswith("ibcmd"):
         ibcmd_exe = v8path
         v8_exe = os.path.join(bin_dir, "1cv8" + suffix)
     else:
         v8_exe = v8path
         ibcmd_exe = os.path.join(bin_dir, "ibcmd" + suffix)
+    expected_version = os.path.basename(os.path.dirname(bin_dir))
+    if not os.path.isfile(ibcmd_exe) and os.name == "nt" and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", expected_version):
+        for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+            candidate = os.path.join(base, "1cv8", expected_version, "bin", "ibcmd.exe")
+            if os.path.isfile(candidate):
+                ibcmd_exe = candidate
+                break
     has_v8 = os.path.isfile(v8_exe)
     has_ibcmd = os.path.isfile(ibcmd_exe)
+    actual_ibcmd_version = _version_dir(ibcmd_exe) if has_ibcmd else ""
+    if (re.fullmatch(r"\d+\.\d+\.\d+\.\d+", expected_version)
+            and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", actual_ibcmd_version)
+            and actual_ibcmd_version != expected_version):
+        print(
+            f"Error: ibcmd version {actual_ibcmd_version} does not match 1cv8 version "
+            f"{expected_version}; install/pass ibcmd from the same platform version"
+        )
+        sys.exit(1)
 
     # --- Разбор и проверка команды ---
     cmd = (args.Command or "").strip().lower()
@@ -770,11 +792,22 @@ def main():
             arguments += v8_extra_args
             print("Running: 1cv8.exe " + _redact(" ".join(format_args_for_display(arguments, "1cv8")),
                                                  args.Password, args.UserName, repo.get("password")))
-            r = run_v8(v8_exe, arguments)
-            log = ""
-            if os.path.isfile(out_file):
-                with open(out_file, encoding="utf-8-sig", errors="replace") as f:
-                    log = f.read().strip()
+            r, log = None, ""
+            for attempt in range(1, 4):
+                try:
+                    os.remove(out_file)
+                except FileNotFoundError:
+                    pass
+                r = run_v8(v8_exe, arguments)
+                log = ""
+                if os.path.isfile(out_file):
+                    with open(out_file, encoding="utf-8-sig", errors="replace") as f:
+                        log = f.read().strip()
+                combined = log + "\n" + (r.stdout or "") + (r.stderr or "")
+                if r.returncode == 0 or not re.search(r"Ошибка блокировки информационной базы|infobase lock|already opened.*Designer", combined, re.I) or attempt == 3:
+                    break
+                print(f"Database is locked by a finishing Designer process; retry {attempt}/3 in {attempt * 2} s")
+                time.sleep(attempt * 2)
             return {"exit": r.returncode, "log": log, "result": r}
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -803,7 +836,7 @@ def main():
         if not args.InfoBasePath:
             return "свойства читает ibcmd, а он подключается к файловой базе (--db-path)"
         if not has_ibcmd:
-            return "рядом с 1cv8 нет ibcmd (%s) - эта установка платформы его не содержит" % ibcmd_exe
+            return "ibcmd не найден (%s). Установите компонент «Сервер 1С:Предприятия» той же версии или передайте -IbcmdPath" % ibcmd_exe
         return None
 
     def get_extension_properties():

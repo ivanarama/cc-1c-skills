@@ -35,6 +35,9 @@ param(
     [string]$V8Path,
 
     [Parameter(Mandatory=$false)]
+    [string]$IbcmdPath,
+
+    [Parameter(Mandatory=$false)]
     [string]$InfoBasePath,
 
     [Parameter(Mandatory=$false)]
@@ -109,6 +112,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 # Общий блок группы db-*: реквизиты хранилища, дополнительные аргументы, запуск платформы.
 # Копии держит одинаковыми tests/skills/check-inline-drift.mjs — правку вносить в навык-эталон.
 $Extension = $Name
+$IbcmdPath = if ($IbcmdPath) { $IbcmdPath.Trim().Trim('"') } else { $null }
 
 # --- Реквизиты хранилища из .v8-project.json ---
 # Модель их не передаёт: скрипт сопоставляет параметры соединения с записью в databases[]
@@ -513,15 +517,30 @@ $binDir = Split-Path $V8Path -Parent
 $exeLeaf = Split-Path $V8Path -Leaf
 # Расширение файла сохраняем: на Windows это .exe, на *nix его нет, в тестах — .cmd/.sh.
 $exeSuffix = [System.IO.Path]::GetExtension($V8Path)
-if ($exeLeaf -match '^ibcmd') {
+if ($IbcmdPath) {
+    $v8Exe = $V8Path
+    $ibcmdExe = $IbcmdPath
+} elseif ($exeLeaf -match '^ibcmd') {
     $ibcmdExe = $V8Path
     $v8Exe = Join-Path $binDir ("1cv8" + $exeSuffix)
 } else {
     $v8Exe = $V8Path
     $ibcmdExe = Join-Path $binDir ("ibcmd" + $exeSuffix)
 }
+$expectedVersion = Split-Path $binDir -Leaf
+if (-not (Test-Path $ibcmdExe) -and $expectedVersion -match '^\d+\.\d+\.\d+\.\d+$') {
+    $candidate = Get-ChildItem @("C:\Program Files\1cv8\$expectedVersion\bin\ibcmd.exe", "C:\Program Files (x86)\1cv8\$expectedVersion\bin\ibcmd.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($candidate) { $ibcmdExe = $candidate.FullName }
+}
 $hasV8 = Test-Path $v8Exe
 $hasIbcmd = Test-Path $ibcmdExe
+if ($hasIbcmd -and $expectedVersion -match '^\d+\.\d+\.\d+\.\d+$') {
+    $actualVersion = (Get-Item $ibcmdExe).VersionInfo.FileVersion
+    if ($actualVersion -and -not $actualVersion.StartsWith($expectedVersion)) {
+        Write-Host "Error: ibcmd version '$actualVersion' does not match 1C platform '$expectedVersion' ($ibcmdExe)" -ForegroundColor Red
+        exit 1
+    }
+}
 
 # --- Разбор и проверка команды ---
 $knownCommands = @('list', 'check', 'set-properties', 'delete')
@@ -677,11 +696,19 @@ function Invoke-Designer {
         $arguments += "/DisableStartupDialogs"
         $arguments += $v8Extra
         Write-Host "Running: 1cv8.exe $(Protect-Secrets ((Format-ArgsForDisplay $arguments '1cv8') -join ' ') @($Password, $UserName, $script:repoSettings.Password))"
-        $res = Invoke-PlatformProcess $v8Exe $arguments -PreQuoted
-        $log = ''
-        if (Test-Path $outFile) {
-            $raw = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
-            if ($raw) { $log = $raw.Trim() }
+        $res = $null; $log = ''
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if (Test-Path $outFile) { Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue }
+            $res = Invoke-PlatformProcess $v8Exe $arguments -PreQuoted
+            $log = ''
+            if (Test-Path $outFile) {
+                $raw = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
+                if ($raw) { $log = $raw.Trim() }
+            }
+            $combined = "$log`n$($res.Output)"
+            if ($res.ExitCode -eq 0 -or $combined -notmatch 'Ошибка блокировки информационной базы|infobase lock|already opened.*Designer' -or $attempt -eq 3) { break }
+            Write-Host "Database is locked by a finishing Designer process; retry $attempt/3 in $($attempt * 2) s" -ForegroundColor Yellow
+            Start-Sleep -Seconds ($attempt * 2)
         }
         return @{
             ExitCode = $res.ExitCode
@@ -720,7 +747,7 @@ function Write-PlatformFailure {
 # --- Свойства расширений: только ibcmd, и только для файловой базы ---
 function Get-PropertiesUnavailableReason {
     if (-not $InfoBasePath) { return "свойства читает ibcmd, а он подключается к файловой базе (--db-path)" }
-    if (-not $hasIbcmd) { return "рядом с 1cv8 нет ibcmd ($ibcmdExe) - эта установка платформы его не содержит" }
+    if (-not $hasIbcmd) { return "ibcmd не найден ($ibcmdExe). Установите компонент «Сервер 1С:Предприятия» той же версии или передайте -IbcmdPath" }
     return $null
 }
 

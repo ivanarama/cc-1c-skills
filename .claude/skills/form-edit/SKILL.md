@@ -42,7 +42,12 @@ powershell.exe -NoProfile -File "${CLAUDE_SKILL_DIR}/scripts/form-edit.ps1" -For
     { "input": "Склад", "path": "Объект.Склад", "on": ["OnChange"] }
   ],
   "attributes": [
-    { "name": "СуммаИтого", "type": "decimal(15,2)" }
+    { "name": "СуммаИтого", "type": "decimal(15,2)" },
+    { "name": "Остатки", "type": "DynamicList", "settings": {
+      "query": "ВЫБРАТЬ ...", "dynamicDataRead": false,
+      "keyType": "RowKey", "keyFields": ["Склад"],
+      "fields": [{ "field": "Склад" }, { "field": "Количество" }]
+    } }
   ],
   "commands": [
     { "name": "Рассчитать", "action": "РассчитатьОбработка" }
@@ -121,6 +126,10 @@ powershell.exe -NoProfile -File "${CLAUDE_SKILL_DIR}/scripts/form-edit.ps1" -For
 ### Система типов (для attributes)
 
 `string`, `string(100)`, `decimal(15,2)`, `boolean`, `date`, `dateTime`, `CatalogRef.XXX`, `DocumentObject.XXX`, `ValueTable`, `DynamicList`, `Type1 | Type2` (составной).
+
+Для `DynamicList` секция `settings` поддерживает `query` (включая `@file.sql` рядом с JSON), `mainTable`, `dynamicDataRead`, `fields`, `keyType` и `keyFields`. Для произвольного запроса без `mainTable` указывай устойчивый ключ результата; для агрегатных запросов обычно отключай `dynamicDataRead`.
+
+`query` — обычный текст запроса, не строковый литерал BSL: начальные `|` не нужны (скрипт удалит их с предупреждением). Для нижней панели горизонтальной формы добавляй элемент на корневой уровень через `"after": "ИмяКорневогоЭлемента"`; `into` помещает его внутрь указанной группы, и в горизонтальной группе панель окажется сбоку.
 
 ### Секции расширений
 

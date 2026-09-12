@@ -922,6 +922,21 @@ foreach ($fi in $script:formList) {
 
 	# Read Form.xml as raw text for BaseForm checks
 	$formRawText = [System.IO.File]::ReadAllText($formXmlFile, [System.Text.Encoding]::UTF8)
+	foreach ($dl in [regex]::Matches($formRawText, '<Settings\s+xsi:type="DynamicList"[^>]*>(.*?)</Settings>', 'Singleline')) {
+		$body = $dl.Groups[1].Value
+		$queryMatch = [regex]::Match($body, '<QueryText>(.*?)</QueryText>', 'Singleline')
+		if ($queryMatch.Success -and $queryMatch.Groups[1].Value -match '(?m)^\s*\|') {
+			Report-Error "11. ${ctx}: DynamicList QueryText contains BSL string-literal '|' prefixes"
+			$check11Ok = $false
+		}
+		if ($body -match '<ManualQuery>true</ManualQuery>' -and $body -notmatch '<MainTable>' -and $body -notmatch '<KeyType>') {
+			Report-Error "11. ${ctx}: manual DynamicList without MainTable needs KeyType/KeyField"
+			$check11Ok = $false
+		}
+		if ($body -match '<ManualQuery>true</ManualQuery>' -and $body -match '<MainTable>AccumulationRegister\.[^<]+\.Balance</MainTable>') {
+			Report-Warn "11. ${ctx}: virtual accumulation-register table is used as MainTable; prefer query + RowKey/KeyField and no MainTable for an added list"
+		}
+	}
 
 	if ($formRawText -match '<BaseForm') {
 		# Check BaseForm has version
@@ -1305,6 +1320,10 @@ $ctrlCount = 0
 foreach ($bslFile in (Get-ChildItem -Path $extRootDir -Recurse -Filter *.bsl -File -ErrorAction SilentlyContinue)) {
 	$txt = [System.IO.File]::ReadAllText($bslFile.FullName, [System.Text.Encoding]::UTF8)
 	$ctrlCount += ([regex]::Matches($txt, '(?m)^\s*&ИзменениеИКонтроль\(')).Count
+	if ($txt -match '(?i)\b(?:Список|ДинамическийСписок)\w*\.ТекущаяСтрока\b') {
+		$relativeBsl = $bslFile.FullName.Substring($extRootDir.Length).TrimStart('\','/')
+		Report-Warn "17. ${relativeBsl}: suspicious DynamicList.ТекущаяСтрока; use form table element .ТекущиеДанные or verify the runtime type"
+	}
 }
 if ($ctrlCount -gt 0) {
 	Out-Line "[INFO]  Контролируемых методов (&ИзменениеИКонтроль): $ctrlCount — их актуальность здесь не проверяется. Сверьте: /cfe-patch-method -Check -ExtensionPath <ext> -ConfigPath <cf>"

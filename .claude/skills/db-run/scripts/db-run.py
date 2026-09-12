@@ -312,6 +312,11 @@ def main():
     parser.add_argument("-Execute", default="")
     parser.add_argument("-CParam", default="")
     parser.add_argument("-URL", default="")
+    parser.add_argument("-Client", choices=["Thick", "Thin"], default="Thick")
+    parser.add_argument("-Visible", action="store_true")
+    parser.add_argument("-SingleInstance", action="store_true")
+    parser.add_argument("-WaitReadySeconds", type=int, default=0)
+    parser.add_argument("-ReadyGraceSeconds", type=int, default=30)
     parser.add_argument("-AdditionalV8Arguments", nargs="*", default=[],
                         help="Extra 1cv8 arguments, e.g. /UseHwLicenses+")
     parser.add_argument("-AdditionalIbcmdArguments", nargs="*", default=[],
@@ -325,6 +330,12 @@ def main():
     args.Execute = clean_path(args.Execute, "-Execute")
 
     v8path = resolve_v8path(args.V8Path)
+    launch_exe = v8path
+    if args.Client == "Thin":
+        launch_exe = os.path.join(os.path.dirname(v8path), "1cv8c.exe" if os.name == "nt" else "1cv8c")
+        if not os.path.isfile(launch_exe):
+            print(f"Error: thin client executable not found at {launch_exe}")
+            sys.exit(1)
 
     # --- Resolve additional arguments ---
     # 1C:Enterprise is always launched by 1cv8 — ibcmd has no interactive mode.
@@ -375,13 +386,22 @@ def main():
     if args.URL:
         arguments.extend(["/URL", args.URL])
 
-    arguments.append("/DisableStartupDialogs")
+    if not args.Visible:
+        arguments.append("/DisableStartupDialogs")
     arguments.extend(extra_args)
 
     # --- Execute (background) ---
     # Redact the password/user before printing the command line — never leak secrets.
-    print(f"Running: 1cv8.exe {_redact(' '.join(format_args_for_display(arguments, engine)), args.Password, args.UserName)}")
-    proc = subprocess.Popen([v8path] + arguments)
+    if args.SingleInstance and os.name == "nt":
+        needle = args.InfoBasePath or f"{args.InfoBaseServer}/{args.InfoBaseRef}"
+        check = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            "$n=$args[0]; @(Get-CimInstance Win32_Process -Filter \"Name='1cv8.exe' OR Name='1cv8c.exe'\" | Where-Object {$_.CommandLine -and $_.CommandLine.IndexOf($n,[StringComparison]::OrdinalIgnoreCase)-ge 0}).Count", needle],
+            capture_output=True, text=True)
+        if check.returncode == 0 and check.stdout.strip() not in ("", "0"):
+            print("Error: 1C client for this infobase is already running")
+            sys.exit(2)
+    print(f"Running: {os.path.basename(launch_exe)} {_redact(' '.join(format_args_for_display(arguments, engine)), args.Password, args.UserName)}")
+    proc = subprocess.Popen([launch_exe] + arguments)
 
     # --- Bounded early-exit check ---
     # The launch is a background GUI process, so we don't wait for completion. But a process
@@ -395,7 +415,56 @@ def main():
         print(f"Error: 1C:Enterprise exited immediately (code: {rc})")
         sys.exit(rc if rc and rc > 0 else 1)
     print(f"PID: {proc.pid}")
-    print("1C:Enterprise launched")
+    if args.WaitReadySeconds > 0:
+        if os.name != "nt":
+            print("Error: -WaitReadySeconds currently requires Windows")
+            sys.exit(3)
+        import ctypes
+        def window_state(pid):
+            found = []
+            callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def callback(hwnd, _):
+                owner = ctypes.c_ulong()
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                if owner.value == pid and ctypes.windll.user32.IsWindowVisible(hwnd):
+                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                    if buf.value:
+                        found.append((hwnd, buf.value))
+                return True
+            ctypes.windll.user32.EnumWindows(callback_type(callback), 0)
+            return found[0] if found else (0, "")
+        deadline = time.monotonic() + args.WaitReadySeconds
+        title = ""
+        while time.monotonic() < deadline:
+            rc = proc.poll()
+            if rc is not None:
+                print(f"Error: 1C:Enterprise exited before becoming ready (code: {rc})")
+                sys.exit(rc if rc else 1)
+            _, title = window_state(proc.pid)
+            if title and "Загрузка конфигурационной информации" not in title and "Loading configuration information" not in title:
+                print(f"1C:Enterprise ready: {title}")
+                break
+            time.sleep(0.5)
+        else:
+            if args.ReadyGraceSeconds > 0 and title and "Загрузка конфигурационной информации" not in title and "Loading configuration information" not in title:
+                print(f"[WARN] Normal application title appeared near timeout; waiting {args.ReadyGraceSeconds} extra seconds for readiness.")
+                grace_deadline = time.monotonic() + args.ReadyGraceSeconds
+                while time.monotonic() < grace_deadline and proc.poll() is None:
+                    _, title = window_state(proc.pid)
+                    if title:
+                        print(f"1C:Enterprise ready: {title}")
+                        break
+                    time.sleep(0.5)
+                else:
+                    print(f"Error: client did not become ready within {args.WaitReadySeconds}+{args.ReadyGraceSeconds} seconds (PID: {proc.pid}, title: '{title}')")
+                    sys.exit(3)
+            else:
+                print(f"Error: client did not become ready within {args.WaitReadySeconds} seconds (PID: {proc.pid}, title: '{title}')")
+                sys.exit(3)
+    else:
+        print("1C:Enterprise launched")
 
 
 if __name__ == "__main__":

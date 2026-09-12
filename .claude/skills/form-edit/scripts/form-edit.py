@@ -329,6 +329,7 @@ NS = {
 
 ALL_NS_DECL = (
     'xmlns="http://v8.1c.ru/8.3/xcf/logform"'
+    ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
     ' xmlns:v8="http://v8.1c.ru/8.1/data/core"'
     ' xmlns:v8ui="http://v8.1c.ru/8.1/data/ui"'
     ' xmlns:xr="http://v8.1c.ru/8.3/xcf/readable"'
@@ -1300,6 +1301,9 @@ if elements_list:
         if target_ci is None:
             # Create ChildItems for the group
             target_ci = etree.SubElement(target_group, f"{{{FORM_NS}}}ChildItems")
+        target_orientation = target_group.find("f:Group", NS)
+        if target_orientation is not None and "Horizontal" in (target_orientation.text or ""):
+            print(f"[WARN] Target '{into_name}' is horizontal: added siblings will be placed side-by-side. For a bottom panel use root-level 'after'.")
     elif after_name:
         after_elem = find_element(root_ci, after_name)
         if after_elem is None:
@@ -1440,6 +1444,36 @@ if attrs_list:
             emit_type(str(attr["type"]), inner)
         else:
             X(f"{inner}<Type/>")
+        settings = attr.get("settings") if attr.get("type") == "DynamicList" else None
+        if settings:
+            X(f'{inner}<Settings xsi:type="DynamicList">')
+            si = inner + "\t"
+            query = str(settings.get("query") or "")
+            if query.startswith("@"):
+                with open(os.path.join(os.path.dirname(os.path.abspath(args.JsonPath)), query[1:]), encoding="utf-8-sig") as qf:
+                    query = qf.read()
+            query_lines = query.splitlines()
+            if any(re.match(r"^\s*\|", line) for line in query_lines):
+                query = "\n".join(re.sub(r"^(\s*)\|\s?", r"\1", line) for line in query_lines)
+                print(f"[WARN] DynamicList '{attr_name}': removed BSL string-literal '|' prefixes from query text.")
+            X(f"{si}<ManualQuery>{'true' if query.strip() else 'false'}</ManualQuery>")
+            X(f"{si}<DynamicDataRead>{'false' if settings.get('dynamicDataRead') is False else 'true'}</DynamicDataRead>")
+            if query.strip():
+                X(f"{si}<QueryText>{esc_xml_text(query)}</QueryText>")
+            for fld in settings.get("fields") or []:
+                field = str(fld if isinstance(fld, str) else fld.get("field") or "")
+                data_path = str(field if isinstance(fld, str) else fld.get("dataPath", field))
+                X(f'{si}<Field xsi:type="dcssch:DataSetFieldField">')
+                X(f"{si}\t<dcssch:dataPath>{esc_xml_text(data_path)}</dcssch:dataPath>")
+                X(f"{si}\t<dcssch:field>{esc_xml_text(field)}</dcssch:field>")
+                X(f"{si}</Field>")
+            if settings.get("keyType"):
+                X(f"{si}<KeyType>{esc_xml_text(str(settings['keyType']))}</KeyType>")
+            for key_field in settings.get("keyFields") or []:
+                X(f"{si}<KeyField>{esc_xml_text(str(key_field))}</KeyField>")
+            if settings.get("mainTable"):
+                X(f"{si}<MainTable>{esc_xml_text(str(settings['mainTable']))}</MainTable>")
+            X(f"{inner}</Settings>")
         if attr.get("main") is True:
             X(f"{inner}<MainAttribute>true</MainAttribute>")
         if attr.get("savedData") is True:
