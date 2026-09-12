@@ -9,7 +9,7 @@
       "source": {
         "source": "url",
         "url": "https://github.com/ivanarama/cc-1c-skills.git",
-        "ref": "feature/db-query"
+        "ref": "main"
       },
       "policy": {
         "installation": "AVAILABLE"
