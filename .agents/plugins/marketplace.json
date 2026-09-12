@@ -8,8 +8,8 @@
       "name": "1c-skills",
       "source": {
         "source": "url",
-        "url": "https://github.com/Nikolay-Shirokov/cc-1c-skills.git",
-        "ref": "port-codex"
+        "url": "https://github.com/ivanarama/cc-1c-skills.git",
+        "ref": "feature/db-query"
       },
       "policy": {
         "installation": "AVAILABLE"
