@@ -527,7 +527,9 @@ if ($IbcmdPath) {
     $v8Exe = $V8Path
     $ibcmdExe = Join-Path $binDir ("ibcmd" + $exeSuffix)
 }
-$expectedVersion = Split-Path $binDir -Leaf
+# Standard layout is ...\1cv8\<version>\bin\1cv8.exe.  Keep this in sync with
+# the Python port, which likewise reads the directory above bin.
+$expectedVersion = Split-Path (Split-Path $binDir -Parent) -Leaf
 if (-not (Test-Path $ibcmdExe) -and $expectedVersion -match '^\d+\.\d+\.\d+\.\d+$') {
     $candidate = Get-ChildItem @("C:\Program Files\1cv8\$expectedVersion\bin\ibcmd.exe", "C:\Program Files (x86)\1cv8\$expectedVersion\bin\ibcmd.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($candidate) { $ibcmdExe = $candidate.FullName }

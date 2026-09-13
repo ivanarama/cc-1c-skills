@@ -1,0 +1,39 @@
+{
+  "name": "ibcmd другой версии отклоняется до запуска",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "fakePlatform": {
+    "log": ""
+  },
+  "preRun": [
+    {
+      "writeFile": {
+        "path": "8.3.27.1859/bin/1cv8.cmd",
+        "content": "@echo off\r\nexit /b 0\r\n",
+        "executable": true
+      }
+    }
+  ],
+  "args_extra": [
+    "-V8Path",
+    "{workDir}/8.3.27.1859/bin/1cv8.cmd",
+    "-IbcmdPath",
+    "C:/Windows/System32/cmd.exe",
+    "-InfoBasePath",
+    "{workDir}/ib",
+    "-Command",
+    "set-properties",
+    "-Name",
+    "Альфа",
+    "-SafeMode",
+    "off"
+  ],
+  "expectError": true,
+  "expect": {
+    "stdoutContains": [
+      "does not match 1C platform '8.3.27.1859'",
+      "cmd.exe"
+    ]
+  },
+  "noSnapshot": "негативный кейс — несовместимость версий обнаруживается до запуска ibcmd"
+}

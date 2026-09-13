@@ -3,6 +3,7 @@
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 
 import argparse
+import ctypes
 import glob
 import json
 import os
@@ -10,6 +11,85 @@ import re
 import subprocess
 import sys
 import time
+
+
+_LOADING_WINDOW_TITLES = (
+    "Загрузка конфигурационной информации",
+    "Loading configuration information",
+)
+
+
+def _window_is_ready(title, responding, reject_loading_title=True):
+    """Mirror the PowerShell readiness gate: titled, responding GUI window.
+
+    The initial wait also rejects the known 1C loading title. The grace wait keeps
+    the PowerShell behavior and only requires a responding titled window because
+    it is entered after a normal application title has already been observed.
+    """
+    return bool(
+        title
+        and responding
+        and (
+            not reject_loading_title
+            or not any(marker in title for marker in _LOADING_WINDOW_TITLES)
+        )
+    )
+
+
+def _window_responds(send_message_timeout, hwnd, timeout_ms=500):
+    """Probe a Win32 window message loop without waiting indefinitely.
+
+    ``Process.Responding`` in the PowerShell port performs the same kind of GUI
+    responsiveness check. A visible window and a normal title alone are not
+    enough: a hung 1C client must remain in the readiness wait and time out.
+    """
+    message_result = ctypes.c_size_t()
+    # WM_NULL asks the target message loop to process a harmless message.
+    # SMTO_BLOCK | SMTO_ABORTIFHUNG bounds the call when the target is hung.
+    return bool(
+        send_message_timeout(
+            hwnd,
+            0x0000,
+            0,
+            0,
+            0x0001 | 0x0002,
+            timeout_ms,
+            ctypes.byref(message_result),
+        )
+    )
+
+
+def _select_window_state(
+    windows,
+    send_message_timeout,
+    reject_loading_title=True,
+):
+    """Evaluate every titled window and select readiness/diagnostic state.
+
+    1C can own more than one top-level window while starting. Enumeration order
+    is not a main-window guarantee, so a hung splash/modal must not hide a later
+    responsive application window. When none is ready, prefer a normal title for
+    grace/timeout diagnostics, then a responsive loading title, then the first
+    remaining window.
+    """
+    states = [
+        (hwnd, title, _window_responds(send_message_timeout, hwnd))
+        for hwnd, title in windows
+    ]
+    if not states:
+        return 0, "", False
+
+    def priority(state):
+        _, title, responding = state
+        loading = any(marker in title for marker in _LOADING_WINDOW_TITLES)
+        ready = _window_is_ready(title, responding, reject_loading_title)
+        return (
+            0 if ready else 1,
+            0 if not loading else 1,
+            0 if responding else 1,
+        )
+
+    return min(states, key=priority)
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -419,22 +499,60 @@ def main():
         if os.name != "nt":
             print("Error: -WaitReadySeconds currently requires Windows")
             sys.exit(3)
-        import ctypes
-        def window_state(pid):
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        callback_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HWND,
+            wintypes.LPARAM,
+        )
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [
+            wintypes.HWND,
+            wintypes.LPWSTR,
+            ctypes.c_int,
+        ]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.SendMessageTimeoutW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+            wintypes.UINT,
+            wintypes.UINT,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+
+        def window_state(pid, reject_loading_title=True):
             found = []
-            callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
             def callback(hwnd, _):
-                owner = ctypes.c_ulong()
-                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
-                if owner.value == pid and ctypes.windll.user32.IsWindowVisible(hwnd):
-                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                owner = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+                if owner.value == pid and user32.IsWindowVisible(hwnd):
+                    length = user32.GetWindowTextLengthW(hwnd)
                     buf = ctypes.create_unicode_buffer(length + 1)
-                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
                     if buf.value:
                         found.append((hwnd, buf.value))
                 return True
-            ctypes.windll.user32.EnumWindows(callback_type(callback), 0)
-            return found[0] if found else (0, "")
+            user32.EnumWindows(callback_type(callback), 0)
+            return _select_window_state(
+                found,
+                user32.SendMessageTimeoutW,
+                reject_loading_title,
+            )
         deadline = time.monotonic() + args.WaitReadySeconds
         title = ""
         while time.monotonic() < deadline:
@@ -442,18 +560,21 @@ def main():
             if rc is not None:
                 print(f"Error: 1C:Enterprise exited before becoming ready (code: {rc})")
                 sys.exit(rc if rc else 1)
-            _, title = window_state(proc.pid)
-            if title and "Загрузка конфигурационной информации" not in title and "Loading configuration information" not in title:
+            _, title, responding = window_state(proc.pid)
+            if _window_is_ready(title, responding):
                 print(f"1C:Enterprise ready: {title}")
                 break
             time.sleep(0.5)
         else:
-            if args.ReadyGraceSeconds > 0 and title and "Загрузка конфигурационной информации" not in title and "Loading configuration information" not in title:
+            if args.ReadyGraceSeconds > 0 and title and not any(marker in title for marker in _LOADING_WINDOW_TITLES):
                 print(f"[WARN] Normal application title appeared near timeout; waiting {args.ReadyGraceSeconds} extra seconds for readiness.")
                 grace_deadline = time.monotonic() + args.ReadyGraceSeconds
                 while time.monotonic() < grace_deadline and proc.poll() is None:
-                    _, title = window_state(proc.pid)
-                    if title:
+                    _, title, responding = window_state(
+                        proc.pid,
+                        reject_loading_title=False,
+                    )
+                    if _window_is_ready(title, responding, reject_loading_title=False):
                         print(f"1C:Enterprise ready: {title}")
                         break
                     time.sleep(0.5)

@@ -20,6 +20,7 @@ const GUARDS = [
   ['check-agent-portability.mjs', 'исходники навыков: без привязки к конкретному AI-агенту'],
   ['check-error-streams.mjs', 'сообщения об ошибках: один и тот же поток в обоих портах'],
   ['check-nonascii-fs.mjs', 'fsutil: удаление и копирование держат не-ASCII пути, копии не разошлись'],
+  ['check-db-run-readiness.mjs', 'db-run Python: готовность требует отвечающее окно и учитывает все HWND'],
 ];
 
 let failed = 0;
