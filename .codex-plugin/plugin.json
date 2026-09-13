@@ -1,0 +1,39 @@
+{
+  "name": "1c-skills",
+  "version": "2026.9.13+e729cbb",
+  "description": "[PowerShell] Навыки разработки 1С 8.3: XML и CLI конфигуратора, тестирование веб-клиента и, на Windows с PowerShell, толстого/тонкого клиента.",
+  "author": {
+    "name": "Nikolay Shirokov"
+  },
+  "homepage": "https://github.com/Nikolay-Shirokov/cc-1c-skills",
+  "repository": "https://github.com/Nikolay-Shirokov/cc-1c-skills",
+  "license": "MIT",
+  "keywords": [
+    "1c",
+    "1c-dev",
+    "cf",
+    "cfe",
+    "epf",
+    "erf",
+    "metadata",
+    "configuration",
+    "extension",
+    "form",
+    "report",
+    "skd",
+    "data-processor",
+    "mxl",
+    "web-client",
+    "desktop-client",
+    "thick-client",
+    "thin-client",
+    "testing",
+    "test-automation"
+  ],
+  "skills": "./.codex/skills/",
+  "interface": {
+    "displayName": "1C Skills (PowerShell)",
+    "shortDescription": "PowerShell runtime (Windows-first)",
+    "category": "Development"
+  }
+}
