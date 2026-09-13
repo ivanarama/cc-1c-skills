@@ -1,0 +1,12 @@
+{
+  "name": "Обязательные селекторы проверяются заранее",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": [
+      { "type": "toggle", "state": "On" }
+    ]
+  },
+  "expectError": "requires 'automationName'",
+  "noSnapshot": "негативная офлайн-проверка"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "dismissWindow без семантического селектора отклоняется заранее",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": [
+      { "type": "dismissWindow", "title": ".*" }
+    ]
+  },
+  "expectError": "dismissWindow requires a specific 'title' or 'containsElement'",
+  "noSnapshot": "защита от закрытия произвольного окна процесса 1С"
+}

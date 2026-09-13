@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "1c-skills",
-  "description": "[PowerShell] Навыки для разработки на 1С:Предприятие 8.3 — абстракции над XML-форматами и CLI конфигуратора, плюс глаза и руки для тестирования через веб-клиент.",
+  "description": "[PowerShell] Навыки для разработки на 1С:Предприятие 8.3 — абстракции над XML-форматами и CLI конфигуратора, плюс тестирование в веб-клиенте, толстом и тонком клиентах 1С.",
   "author": {
     "name": "Nikolay Shirokov"
   },
@@ -24,6 +24,9 @@
     "data-processor",
     "mxl",
     "web-client",
+    "desktop-client",
+    "thick-client",
+    "thin-client",
     "testing",
     "test-automation"
   ],

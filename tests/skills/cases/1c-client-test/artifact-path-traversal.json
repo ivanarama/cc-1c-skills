@@ -1,0 +1,12 @@
+{
+  "name": "Путь артефакта не может выйти из OutputDir",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": [
+      { "type": "screenshot", "file": "../outside.png" }
+    ]
+  },
+  "expectError": "Artifact path cannot contain '..'",
+  "noSnapshot": "проверяется отказ до запуска и записи файла"
+}

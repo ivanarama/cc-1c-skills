@@ -1,0 +1,12 @@
+{
+  "name": "Неизвестное действие отклоняется до запуска клиента",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": [
+      { "type": "guessAndClick", "automationName": "Продолжить" }
+    ]
+  },
+  "expectError": "unknown type 'guessAndClick'",
+  "noSnapshot": "негативная офлайн-проверка"
+}

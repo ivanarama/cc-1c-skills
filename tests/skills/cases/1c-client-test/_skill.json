@@ -1,0 +1,12 @@
+{
+  "script": "1c-client-test/scripts/client-test",
+  "setup": "none",
+  "args": [
+    { "flag": "-ScenarioPath", "from": "inputFile" },
+    { "flag": "-ValidateScenarioOnly", "from": "switch" }
+  ],
+  "snapshot": {
+    "root": "workDir",
+    "normalizeUuids": false
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "Некорректное регулярное выражение отклоняется до запуска клиента",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": [
+      { "type": "assertWindow", "title": "[незакрытая группа" }
+    ]
+  },
+  "expectError": "invalid regex in 'title'",
+  "noSnapshot": "негативная офлайн-проверка"
+}
