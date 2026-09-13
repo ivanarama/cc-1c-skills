@@ -76,6 +76,215 @@ function Report-Warn {
 	Out-Line "[WARN]  $msg"
 }
 
+$script:dlIdentPattern = '[A-Za-z\u0410-\u042F\u0401\u0430-\u044F\u0451_][A-Za-z0-9\u0410-\u042F\u0401\u0430-\u044F\u0451_]*'
+
+function Get-DlText {
+	param($Node, [string]$Name)
+	$child = $Node.SelectSingleNode("*[local-name()='$Name']")
+	if ($child) { return $child.InnerText.Trim() }
+	return ''
+}
+
+function Get-DlQueryParameters {
+	param([string]$Query)
+	$result = New-Object System.Collections.Generic.List[string]; $seen = @{}
+	foreach ($match in [regex]::Matches("$Query", '&(' + $script:dlIdentPattern + ')')) {
+		$name = $match.Groups[1].Value; $key = $name.ToLowerInvariant()
+		if (-not $seen.ContainsKey($key)) { $seen[$key] = $true; $result.Add($name) }
+	}
+	return @($result)
+}
+
+function Split-DlQueryItems {
+	param([string]$Text)
+	$result = New-Object System.Collections.Generic.List[string]
+	$current = New-Object System.Text.StringBuilder; $depth = 0; $inString = $false
+	for ($i = 0; $i -lt $Text.Length; $i++) {
+		$ch = $Text[$i]
+		if ($ch -eq '"') {
+			[void]$current.Append($ch)
+			if ($inString -and $i + 1 -lt $Text.Length -and $Text[$i + 1] -eq '"') { [void]$current.Append($Text[++$i]); continue }
+			$inString = -not $inString
+		} elseif (-not $inString -and $ch -eq '(') { $depth++; [void]$current.Append($ch)
+		} elseif (-not $inString -and $ch -eq ')') { $depth = [Math]::Max(0, $depth - 1); [void]$current.Append($ch)
+		} elseif (-not $inString -and $depth -eq 0 -and $ch -eq ',') {
+			$item = $current.ToString().Trim(); if ($item) { $result.Add($item) }; [void]$current.Clear()
+		} else { [void]$current.Append($ch) }
+	}
+	$item = $current.ToString().Trim(); if ($item) { $result.Add($item) }
+	return @($result)
+}
+
+function Get-DlAggregateKeyInfo {
+	param([string]$Query)
+	$empty = [pscustomobject]@{ GroupAliases = @(); AggregateAliases = @() }
+	$aggregatePattern = '(?i)\b(?:СУММА|КОЛИЧЕСТВО|СРЕДНЕЕ|МИНИМУМ|МАКСИМУМ|SUM|COUNT|AVG|MIN|MAX)\s*\('
+	if ($Query -notmatch $aggregatePattern -or $Query -match '(?i)\b(?:ОБЪЕДИНИТЬ|UNION)\b') { return $empty }
+	$select = [regex]::Match($Query, '(?is)\b(?:ВЫБРАТЬ|SELECT)\b(.*?)\b(?:ИЗ|FROM)\b')
+	$group = [regex]::Match($Query, '(?is)\b(?:СГРУППИРОВАТЬ\s+ПО|GROUP\s+BY)\b(.*?)(?=\b(?:ИМЕЮЩИЕ|HAVING|УПОРЯДОЧИТЬ\s+ПО|ORDER\s+BY|ИТОГИ|TOTALS)\b|$)')
+	if (-not $select.Success -or -not $group.Success) { return $empty }
+	$exprAlias = @{}; $aggregateAliases = @{}
+	$aliasPattern = '(?is)^(.*?)\s+(?:КАК|AS)\s+(' + $script:dlIdentPattern + ')\s*$'
+	foreach ($item in (Split-DlQueryItems $select.Groups[1].Value)) {
+		$aliasMatch = [regex]::Match($item, $aliasPattern)
+		if ($aliasMatch.Success) { $expr = $aliasMatch.Groups[1].Value; $alias = $aliasMatch.Groups[2].Value }
+		else { $simple = [regex]::Match($item, '(' + $script:dlIdentPattern + ')\s*$'); if (-not $simple.Success) { continue }; $expr = $item; $alias = $simple.Groups[1].Value }
+		$key = ([regex]::Replace($expr, '\s+', '')).ToLowerInvariant(); $exprAlias[$key] = $alias
+		if ($expr -match $aggregatePattern) { $aggregateAliases[$alias.ToLowerInvariant()] = $true }
+	}
+	$groupAliases = @{}
+	foreach ($expr in (Split-DlQueryItems $group.Groups[1].Value)) {
+		$key = ([regex]::Replace($expr, '\s+', '')).ToLowerInvariant()
+		if ($exprAlias.ContainsKey($key)) { $groupAliases[$exprAlias[$key].ToLowerInvariant()] = $true }
+		elseif ($expr.Trim() -match ('^' + $script:dlIdentPattern + '$')) { $groupAliases[$expr.Trim().ToLowerInvariant()] = $true }
+		else { return [pscustomobject]@{ GroupAliases = @(); AggregateAliases = @($aggregateAliases.Keys) } }
+	}
+	return [pscustomobject]@{ GroupAliases = @($groupAliases.Keys); AggregateAliases = @($aggregateAliases.Keys) }
+}
+
+function Remove-DlBslComments {
+	param([string]$Text)
+	$result = New-Object System.Collections.Generic.List[string]
+	foreach ($line in ([regex]::Split("$Text", '\r?\n'))) {
+		$out = New-Object System.Text.StringBuilder; $inString = $false
+		for ($i = 0; $i -lt $line.Length; $i++) {
+			$ch = $line[$i]
+			if ($ch -eq '"') {
+				[void]$out.Append($ch)
+				if ($inString -and $i + 1 -lt $line.Length -and $line[$i + 1] -eq '"') { [void]$out.Append($line[++$i]); continue }
+				$inString = -not $inString
+			} elseif (-not $inString -and $ch -eq '/' -and $i + 1 -lt $line.Length -and $line[$i + 1] -eq '/') { break }
+			else { [void]$out.Append($ch) }
+		}
+		$result.Add($out.ToString())
+	}
+	return ($result -join "`n")
+}
+
+function Get-DlBslRoutines {
+	param([string]$Text)
+	$clean = Remove-DlBslComments $Text; $routines = @{}
+	$pattern = '(?ims)^\s*(?:Процедура|Procedure|Функция|Function)\s+(' + $script:dlIdentPattern + ')\s*\([^)]*\)(.*?)^\s*(?:КонецПроцедуры|EndProcedure|КонецФункции|EndFunction)\b'
+	foreach ($match in [regex]::Matches($clean, $pattern)) {
+		$name = $match.Groups[1].Value; $routines[$name.ToLowerInvariant()] = [pscustomobject]@{ Name = $name; Body = $match.Groups[2].Value }
+	}
+	return $routines
+}
+
+function Get-DlReachableBsl {
+	param($Routines, [string]$Handler)
+	$queue = New-Object System.Collections.Generic.Queue[string]; $queue.Enqueue($Handler.ToLowerInvariant())
+	$seen = @{}; $bodies = New-Object System.Collections.Generic.List[string]
+	while ($queue.Count -gt 0) {
+		$name = $queue.Dequeue(); if ($seen.ContainsKey($name) -or -not $Routines.ContainsKey($name)) { continue }
+		$seen[$name] = $true; $body = $Routines[$name].Body; $bodies.Add($body)
+		foreach ($calledKey in $Routines.Keys) {
+			$called = $Routines[$calledKey].Name
+			if (-not $seen.ContainsKey($calledKey) -and $body -match ('(?i)(?<![A-Za-z0-9_А-Яа-яЁё])' + [regex]::Escape($called) + '\s*\(')) { $queue.Enqueue($calledKey) }
+		}
+	}
+	return ($bodies -join "`n")
+}
+
+function Get-DlServerRoutineNames {
+	param([string]$Text)
+	$clean = Remove-DlBslComments $Text; $result = @{}
+	$pattern = '(?im)^\s*&\s*(?:НаСервере(?:БезКонтекста)?|AtServer(?:NoContext)?)\s*$\s*^\s*(?:Процедура|Procedure|Функция|Function)\s+(' + $script:dlIdentPattern + ')\s*\('
+	foreach ($match in [regex]::Matches($clean, $pattern)) { $result[$match.Groups[1].Value.ToLowerInvariant()] = $true }
+	return $result
+}
+
+function Test-DlRoutineReachesServer {
+	param($Routines, [string]$Name, $ServerNames, $Memo, $Visiting)
+	$key = $Name.ToLowerInvariant()
+	if ($Memo.ContainsKey($key)) { return [bool]$Memo[$key] }
+	if ($ServerNames.ContainsKey($key)) { $Memo[$key] = $true; return $true }
+	if (-not $Routines.ContainsKey($key)) { $Memo[$key] = $false; return $false }
+	if ($Visiting.ContainsKey($key)) { return $false }
+	$nextVisiting = @{}; foreach ($visitedKey in $Visiting.Keys) { $nextVisiting[$visitedKey] = $true }; $nextVisiting[$key] = $true
+	$body = $Routines[$key].Body
+	foreach ($calledKey in $Routines.Keys) {
+		$calledName = $Routines[$calledKey].Name
+		if ($body -match ('(?i)(?<![A-Za-z0-9_А-Яа-яЁё])' + [regex]::Escape($calledName) + '\s*\(') -and
+			(Test-DlRoutineReachesServer $Routines $calledKey $ServerNames $Memo $nextVisiting)) {
+			$Memo[$key] = $true; return $true
+		}
+	}
+	$Memo[$key] = $false; return $false
+}
+
+function Get-DlFirstServerCallPosition {
+	param($Routines, [string]$Handler, $ServerNames)
+	$key = $Handler.ToLowerInvariant(); if (-not $Routines.ContainsKey($key)) { return $null }
+	$body = $Routines[$key].Body; $memo = @{}; $positions = New-Object System.Collections.Generic.List[int]
+	foreach ($calledKey in $Routines.Keys) {
+		if (-not (Test-DlRoutineReachesServer $Routines $calledKey $ServerNames $memo @{})) { continue }
+		$calledName = $Routines[$calledKey].Name
+		$pattern = '(?i)(?<![A-Za-z0-9_А-Яа-яЁё])' + [regex]::Escape($calledName) + '\s*\('
+		foreach ($match in [regex]::Matches($body, $pattern)) { $positions.Add($match.Index) }
+	}
+	if ($positions.Count -eq 0) { return $null }
+	return ($positions | Measure-Object -Minimum).Minimum
+}
+
+function Test-DlDisabledEarlyReturn {
+	param([string]$Body, [string]$FlagName, [int]$FirstServerCall)
+	$flag = '(?:ЭтаФорма\s*\.\s*|ThisForm\s*\.\s*)?' + [regex]::Escape($FlagName)
+	$condition = '(?:(?:Не|Not)\s+' + $flag + '|' + $flag + '\s*=\s*(?:Ложь|False))'
+	$guardPattern = '(?is)\b(?:Если|If)\s+' + $condition + '\s+(?:Тогда|Then)\b(.*?)\b(?:КонецЕсли|EndIf)\b'
+	foreach ($match in [regex]::Matches("$Body", $guardPattern)) {
+		if ($match.Index -ge $FirstServerCall) { continue }
+		$hasReturn = [regex]::IsMatch($match.Groups[1].Value, '(?i)\b(?:Возврат|Return)\s*;')
+		if ($hasReturn -and ($match.Index + $match.Length) -le $FirstServerCall) { return $true }
+	}
+	return $false
+}
+
+function Get-DlToggleHandlers {
+	param($RootNode, $Routines, $BoundTables)
+	$controlledNames = @{}
+	foreach ($table in $BoundTables) {
+		$node = $table
+		while ($node -and $node -ne $RootNode) {
+			if ($node.NodeType -eq 'Element' -and $node.HasAttribute('name')) { $controlledNames[$node.GetAttribute('name').ToLowerInvariant()] = $true }
+			$node = $node.ParentNode
+		}
+	}
+	$result = @()
+	foreach ($checkbox in $RootNode.SelectNodes("*[local-name()='ChildItems']//*[local-name()='CheckBoxField']")) {
+		$dataPath = $checkbox.SelectSingleNode("*[local-name()='DataPath']"); if (-not $dataPath -or -not $dataPath.InnerText.Trim()) { continue }
+		$flagName = $dataPath.InnerText.Trim()
+		foreach ($event in $checkbox.SelectNodes("*[local-name()='Events']/*[local-name()='Event']")) {
+			$eventName = $event.GetAttribute('name').ToLowerInvariant(); if ($eventName -ne 'onchange' -and $eventName -ne 'приизменении') { continue }
+			$handler = $event.InnerText.Trim(); $handlerKey = $handler.ToLowerInvariant(); if (-not $Routines.ContainsKey($handlerKey)) { continue }
+			$body = $Routines[$handlerKey].Body; $controlsVisibility = $false
+			foreach ($elementName in $controlledNames.Keys) {
+				$pattern = '(?i)(?:Элементы|Items)\s*\.\s*' + [regex]::Escape($elementName) + '\s*\.\s*(?:Видимость|Visible)\s*='
+				if ($body -match $pattern) { $controlsVisibility = $true; break }
+			}
+			if ($controlsVisibility) { $result += [pscustomobject]@{ FlagName = $flagName; Handler = $handler; Body = $body } }
+		}
+	}
+	return @($result)
+}
+
+function Test-DlHidden {
+	param($Node, $RootNode)
+	while ($Node -and $Node -ne $RootNode) {
+		$visible = $Node.SelectSingleNode("*[local-name()='Visible']")
+		if ($visible -and $visible.InnerText.Trim().ToLowerInvariant() -eq 'false') { return $true }
+		$Node = $Node.ParentNode
+	}
+	return $false
+}
+
+function Test-DlSetter {
+	param([string]$Text, [string]$AttributeName, [string]$ParameterName)
+	$pattern = '(?i)(?<![A-Za-z0-9_А-Яа-яЁё])(?:ЭтаФорма\s*\.\s*|ThisForm\s*\.\s*)?' + [regex]::Escape($AttributeName) +
+		'\s*\.\s*(?:Параметры|Parameters)\s*\.\s*(?:УстановитьЗначениеПараметра|SetParameterValue)\s*\(\s*"' + [regex]::Escape($ParameterName) + '"'
+	return [regex]::IsMatch("$Text", $pattern)
+}
+
 $finalize = {
 	$checks = $script:okCount + $script:errors + $script:warnings
 	if ($script:errors -eq 0 -and $script:warnings -eq 0 -and -not $Detailed) {
@@ -922,19 +1131,142 @@ foreach ($fi in $script:formList) {
 
 	# Read Form.xml as raw text for BaseForm checks
 	$formRawText = [System.IO.File]::ReadAllText($formXmlFile, [System.Text.Encoding]::UTF8)
-	foreach ($dl in [regex]::Matches($formRawText, '<Settings\s+xsi:type="DynamicList"[^>]*>(.*?)</Settings>', 'Singleline')) {
-		$body = $dl.Groups[1].Value
-		$queryMatch = [regex]::Match($body, '<QueryText>(.*?)</QueryText>', 'Singleline')
-		if ($queryMatch.Success -and $queryMatch.Groups[1].Value -match '(?m)^\s*\|') {
-			Report-Error "11. ${ctx}: DynamicList QueryText contains BSL string-literal '|' prefixes"
-			$check11Ok = $false
+	# Анализируем только корневой слой формы. BaseForm — снимок заимствованной формы, его списки
+	# нельзя считать добавлениями расширения и нельзя диагностировать второй раз.
+	try {
+		$formDoc15 = New-Object System.Xml.XmlDocument
+		$formDoc15.PreserveWhitespace = $false
+		$formDoc15.LoadXml($formRawText)
+		$formRoot15 = $formDoc15.DocumentElement
+	} catch {
+		Report-Error "11. ${ctx}: Ext/Form.xml parse failed: $($_.Exception.Message)"
+		$check11Ok = $false
+		continue
+	}
+
+	$baseForm15 = $formRoot15.SelectSingleNode("*[local-name()='BaseForm']")
+	$baseAttrNames15 = @{}
+	if ($baseForm15) {
+		foreach ($baseAttr in $baseForm15.SelectNodes("*[local-name()='Attributes']/*[local-name()='Attribute']")) {
+			$name = $baseAttr.GetAttribute('name'); if ($name) { $baseAttrNames15[$name.ToLowerInvariant()] = $true }
 		}
-		if ($body -match '<ManualQuery>true</ManualQuery>' -and $body -notmatch '<MainTable>' -and $body -notmatch '<KeyType>') {
-			Report-Error "11. ${ctx}: manual DynamicList without MainTable needs KeyType/KeyField"
-			$check11Ok = $false
+	}
+	$moduleText15 = if (Test-Path $moduleBslFile) { [System.IO.File]::ReadAllText($moduleBslFile, [System.Text.Encoding]::UTF8) } else { '' }
+	$routines15 = Get-DlBslRoutines $moduleText15
+	$serverRoutineNames15 = Get-DlServerRoutineNames $moduleText15
+	$allRoutineText15 = (($routines15.Values | ForEach-Object { $_.Body }) -join "`n")
+	$checkedToggleHandlers15 = @{}
+	$onCreateHandlers15 = @()
+	$events15 = $formRoot15.SelectSingleNode("*[local-name()='Events']")
+	if ($events15) {
+		foreach ($event in $events15.SelectNodes("*[local-name()='Event']")) {
+			$eventName = $event.GetAttribute('name').ToLowerInvariant()
+			if (($eventName -eq 'oncreateatserver' -or $eventName -eq 'присозданиинасервере') -and $event.InnerText.Trim()) { $onCreateHandlers15 += $event.InnerText.Trim() }
 		}
-		if ($body -match '<ManualQuery>true</ManualQuery>' -and $body -match '<MainTable>AccumulationRegister\.[^<]+\.Balance</MainTable>') {
+	}
+	$onCreateText15 = (($onCreateHandlers15 | ForEach-Object { Get-DlReachableBsl $routines15 $_ }) -join "`n")
+
+	foreach ($attr in $formRoot15.SelectNodes("*[local-name()='Attributes']/*[local-name()='Attribute']")) {
+		$attrName = $attr.GetAttribute('name')
+		$typeValues = @($attr.SelectNodes("*[local-name()='Type']/*[local-name()='Type']") | ForEach-Object { $_.InnerText.Trim() })
+		if ($typeValues -notcontains 'cfg:DynamicList') { continue }
+		$settings = $attr.SelectSingleNode("*[local-name()='Settings']")
+		if (-not $settings -or (Get-DlText $settings 'ManualQuery').ToLowerInvariant() -ne 'true') { continue }
+		$query = Get-DlText $settings 'QueryText'
+		if ($query -match '(?m)^\s*\|') {
+			Report-Error "11. ${ctx}: DynamicList '$attrName' QueryText contains BSL string-literal '|' prefixes"; $check11Ok = $false
+		}
+		$mainTable = Get-DlText $settings 'MainTable'
+		$keyType = Get-DlText $settings 'KeyType'
+		$keyFields = @($settings.SelectNodes("*[local-name()='KeyField']") | ForEach-Object { $_.InnerText.Trim() } | Where-Object { $_ })
+		$keyFolded = @($keyFields | ForEach-Object { $_.ToLowerInvariant() })
+		if (-not $mainTable) {
+			if (-not $keyType) { Report-Error "11. ${ctx}: DynamicList '$attrName' without MainTable needs KeyType"; $check11Ok = $false }
+			elseif (@('RowKey','FieldValue','RowNumber','Auto') -notcontains $keyType) { Report-Error "11. ${ctx}: DynamicList '$attrName' has unsupported KeyType '$keyType'"; $check11Ok = $false }
+			elseif (($keyType -eq 'RowKey' -or $keyType -eq 'FieldValue') -and $keyFields.Count -eq 0) { Report-Error "11. ${ctx}: DynamicList '$attrName' KeyType=$keyType needs KeyField"; $check11Ok = $false }
+			elseif ($keyType -eq 'FieldValue' -and $keyFields.Count -ne 1) { Report-Error "11. ${ctx}: DynamicList '$attrName' KeyType=FieldValue needs exactly one KeyField"; $check11Ok = $false }
+			elseif ($keyType -eq 'RowNumber' -and $keyFields.Count -gt 0) { Report-Warn "11. ${ctx}: DynamicList '$attrName' KeyField is ignored for KeyType=RowNumber" }
+
+			$duplicateKeys = @($keyFolded | Group-Object | Where-Object Count -gt 1 | ForEach-Object Name | Sort-Object)
+			if ($duplicateKeys.Count -gt 0) { Report-Error "11. ${ctx}: DynamicList '$attrName' has duplicate KeyField(s): $($duplicateKeys -join ', ')"; $check11Ok = $false }
+			$explicitFields = @{}
+			foreach ($value in $settings.SelectNodes("*[local-name()='Field']/*[local-name()='dataPath']")) {
+				$fieldName = $value.InnerText.Trim(); if ($fieldName) { $explicitFields[$fieldName.ToLowerInvariant()] = $true }
+			}
+			$unknownKeys = @($keyFields | Where-Object { $explicitFields.Count -gt 0 -and -not $explicitFields.ContainsKey($_.ToLowerInvariant()) })
+			if ($unknownKeys.Count -gt 0) { Report-Error "11. ${ctx}: DynamicList '$attrName' KeyField(s) absent from declared fields: $($unknownKeys -join ', ')"; $check11Ok = $false }
+
+			$keyInfo = Get-DlAggregateKeyInfo $query; $keySet = @{}; foreach ($key in $keyFolded) { $keySet[$key] = $true }
+			$missingGroupKeys = @($keyInfo.GroupAliases | Where-Object { -not $keySet.ContainsKey($_) } | Sort-Object)
+			if ($missingGroupKeys.Count -gt 0) { Report-Warn "11. ${ctx}: DynamicList '$attrName' aggregate key omits GROUP BY field(s) $($missingGroupKeys -join ', '); row uniqueness is not guaranteed" }
+			$unstableKeys = @($keyInfo.AggregateAliases | Where-Object { $keySet.ContainsKey($_) } | Sort-Object)
+			if ($unstableKeys.Count -gt 0) { Report-Warn "11. ${ctx}: DynamicList '$attrName' uses aggregate result field(s) as KeyField ($($unstableKeys -join ', ')); the row key changes with the aggregate" }
+		}
+		if ($mainTable -match '^AccumulationRegister\.[^.]+\.Balance$') {
 			Report-Warn "11. ${ctx}: virtual accumulation-register table is used as MainTable; prefer query + RowKey/KeyField and no MainTable for an added list"
+		}
+
+		$queryParams = @(Get-DlQueryParameters $query)
+		$isAdded = $baseForm15 -and -not $baseAttrNames15.ContainsKey($attrName.ToLowerInvariant())
+		if (-not $isAdded -or $queryParams.Count -eq 0) { continue }
+		$boundTables = @()
+		foreach ($table in $formRoot15.SelectNodes("*[local-name()='ChildItems']//*[local-name()='Table']")) {
+			if ((Get-DlText $table 'DataPath').ToLowerInvariant() -eq $attrName.ToLowerInvariant()) { $boundTables += $table }
+		}
+		if ($boundTables.Count -eq 0) { continue }
+		foreach ($toggleHandler in @(Get-DlToggleHandlers $formRoot15 $routines15 $boundTables)) {
+			$handlerKey = $toggleHandler.Handler.ToLowerInvariant()
+			if ($checkedToggleHandlers15.ContainsKey($handlerKey)) { continue }
+			$checkedToggleHandlers15[$handlerKey] = $true
+			$firstServerCall = Get-DlFirstServerCallPosition $routines15 $toggleHandler.Handler $serverRoutineNames15
+			if ($null -ne $firstServerCall -and -not (Test-DlDisabledEarlyReturn $toggleHandler.Body $toggleHandler.FlagName $firstServerCall)) {
+				Report-Warn "11. ${ctx}: DynamicList '$attrName' checkbox handler '$($toggleHandler.Handler)' can reach a local server routine before a recognized disabled-state guard for '$($toggleHandler.FlagName)'; use ``If Not <flag> Then ... Return; EndIf`` before the server-bound call"
+			}
+			if ($null -ne $firstServerCall) {
+				$flagPattern = '(?:ЭтаФорма\s*\.\s*|ThisForm\s*\.\s*)?' + [regex]::Escape($toggleHandler.FlagName)
+				$showPattern = '(?i)(?:Видимость|Visible)\s*=\s*(?:Истина|True|' + $flagPattern + ')'
+				$showMatch = [regex]::Match($toggleHandler.Body, $showPattern)
+				if ($showMatch.Success -and $showMatch.Index -lt $firstServerCall) {
+					Report-Warn "11. ${ctx}: DynamicList '$attrName' checkbox handler '$($toggleHandler.Handler)' makes the panel visible before the server-bound parameter initialization; initialize first, then show"
+				}
+				$reachableToggleText = Get-DlReachableBsl $routines15 $toggleHandler.Handler
+				foreach ($table in $boundTables) {
+					$tableName = $table.GetAttribute('name')
+					$refreshPattern = '(?i)(?:Элементы|Items)\s*\.\s*' + [regex]::Escape($tableName) + '\s*\.\s*(?:Обновить|Refresh)\s*\('
+					if ($reachableToggleText -match $refreshPattern) {
+						Report-Warn "11. ${ctx}: DynamicList '$attrName' checkbox path explicitly refreshes table '$tableName' after/beside parameter initialization; changing DynamicList.Parameters already schedules reread, so verify and remove the extra refresh"
+						break
+					}
+				}
+			}
+		}
+		$initiallyHidden = $true; foreach ($table in $boundTables) { if (-not (Test-DlHidden $table $formRoot15)) { $initiallyHidden = $false; break } }
+
+		$defaulted = @{}
+		foreach ($parameter in $settings.SelectNodes("*[local-name()='Parameter']")) {
+			$nameNode = $parameter.SelectSingleNode("*[local-name()='name']"); $valueNode = $parameter.SelectSingleNode("*[local-name()='value']")
+			if (-not $nameNode -or -not $valueNode) { continue }
+			$isNil = $valueNode.GetAttribute('nil', 'http://www.w3.org/2001/XMLSchema-instance').ToLowerInvariant() -eq 'true'
+			if (-not $isNil) { $defaulted[$nameNode.InnerText.Trim().ToLowerInvariant()] = $true }
+		}
+
+		if ($initiallyHidden) {
+			$missing = @($queryParams | Where-Object { -not $defaulted.ContainsKey($_.ToLowerInvariant()) -and -not (Test-DlSetter $allRoutineText15 $attrName $_) })
+			if ($missing.Count -gt 0) { Report-Warn "11. ${ctx}: DynamicList '$attrName' is initially hidden, but no parameter setter was found for: $($missing -join ', '); initialize before making its table visible" }
+			continue
+		}
+
+		$missing = @($queryParams | Where-Object { -not $defaulted.ContainsKey($_.ToLowerInvariant()) -and -not (Test-DlSetter $onCreateText15 $attrName $_) })
+		if ($missing.Count -gt 0) {
+			$tableNames = @($boundTables | ForEach-Object { $_.GetAttribute('name') }) -join ', '
+			Report-Warn "11. ${ctx}: DynamicList '$attrName' is initially visible in table(s) $tableNames, but OnCreateAtServer does not initialize query parameter(s): $($missing -join ', '); initialize them there or keep the table/ancestor Visible=false until initialization"
+		}
+		$hasSetter = $false; foreach ($parameter in $queryParams) { if (Test-DlSetter $onCreateText15 $attrName $parameter) { $hasSetter = $true; break } }
+		if ($onCreateText15 -and $hasSetter) {
+			foreach ($table in $boundTables) {
+				$tableName = $table.GetAttribute('name'); $refreshPattern = '(?i)(?:Элементы|Items)\s*\.\s*' + [regex]::Escape($tableName) + '\s*\.\s*(?:Обновить|Refresh)\s*\('
+				if ($onCreateText15 -match $refreshPattern) { Report-Warn "11. ${ctx}: DynamicList '$attrName' explicitly refreshes table '$tableName' in OnCreateAtServer; it is redundant before first display"; break }
+			}
 		}
 	}
 

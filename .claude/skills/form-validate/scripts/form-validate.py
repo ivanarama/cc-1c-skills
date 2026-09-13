@@ -135,6 +135,286 @@ def localname(el):
     return etree.QName(el.tag).localname
 
 
+_IDENT = r'[A-Za-z\u0410-\u042F\u0401\u0430-\u044F\u0451_][A-Za-z0-9\u0410-\u042F\u0401\u0430-\u044F\u0451_]*'
+
+
+def _direct_text(node, name):
+    child = node.find(f'{{{F_NS}}}{name}')
+    return (child.text or '').strip() if child is not None else ''
+
+
+def _query_parameters(query):
+    """Return query parameter names in source order, case-insensitively unique."""
+    result = []
+    seen = set()
+    for match in re.finditer(r'&(' + _IDENT + r')', query or ''):
+        name = match.group(1)
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(name)
+    return result
+
+
+def _split_query_items(text):
+    """Split a simple SELECT/GROUP BY list without breaking function arguments."""
+    result, current = [], []
+    depth = 0
+    in_string = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            current.append(ch)
+            if in_string and i + 1 < len(text) and text[i + 1] == '"':
+                current.append(text[i + 1])
+                i += 2
+                continue
+            in_string = not in_string
+        elif not in_string and ch == '(':
+            depth += 1
+            current.append(ch)
+        elif not in_string and ch == ')':
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif not in_string and depth == 0 and ch == ',':
+            item = ''.join(current).strip()
+            if item:
+                result.append(item)
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    item = ''.join(current).strip()
+    if item:
+        result.append(item)
+    return result
+
+
+def _norm_query_expr(value):
+    return re.sub(r'\s+', '', value or '').casefold()
+
+
+def _aggregate_query_key_info(query):
+    """Best-effort aliases for GROUP BY and aggregate SELECT expressions.
+
+    The query language is intentionally not parsed in full.  Returning empty sets means
+    "unknown" and suppresses the heuristic, which is preferable to a false error.
+    """
+    if not re.search(r'(?i)\b(?:\u0421\u0423\u041c\u041c\u0410|\u041a\u041e\u041b\u0418\u0427\u0415\u0421\u0422\u0412\u041e|\u0421\u0420\u0415\u0414\u041d\u0415\u0415|\u041c\u0418\u041d\u0418\u041c\u0423\u041c|\u041c\u0410\u041a\u0421\u0418\u041c\u0423\u041c|SUM|COUNT|AVG|MIN|MAX)\s*\(', query or ''):
+        return set(), set()
+    # UNION and nested SELECTs need a real parser; do not guess there.
+    if re.search(r'(?i)\b(?:\u041e\u0411\u042a\u0415\u0414\u0418\u041d\u0418\u0422\u042c|UNION)\b', query):
+        return set(), set()
+    select_match = re.search(r'(?is)\b(?:\u0412\u042b\u0411\u0420\u0410\u0422\u042c|SELECT)\b(.*?)\b(?:\u0418\u0417|FROM)\b', query)
+    group_match = re.search(
+        r'(?is)\b(?:\u0421\u0413\u0420\u0423\u041f\u041f\u0418\u0420\u041e\u0412\u0410\u0422\u042c\s+\u041f\u041e|GROUP\s+BY)\b(.*?)'
+        r'(?=\b(?:\u0418\u041c\u0415\u042e\u0429\u0418\u0415|HAVING|\u0423\u041f\u041e\u0420\u042f\u0414\u041e\u0427\u0418\u0422\u042c\s+\u041f\u041e|ORDER\s+BY|\u0418\u0422\u041e\u0413\u0418|TOTALS)\b|$)',
+        query,
+    )
+    if not select_match or not group_match:
+        return set(), set()
+
+    expr_alias = {}
+    aggregate_aliases = set()
+    alias_re = re.compile(r'(?is)^(.*?)\s+(?:\u041a\u0410\u041a|AS)\s+(' + _IDENT + r')\s*$')
+    aggregate_re = re.compile(r'(?i)\b(?:\u0421\u0423\u041c\u041c\u0410|\u041a\u041e\u041b\u0418\u0427\u0415\u0421\u0422\u0412\u041e|\u0421\u0420\u0415\u0414\u041d\u0415\u0415|\u041c\u0418\u041d\u0418\u041c\u0423\u041c|\u041c\u0410\u041a\u0421\u0418\u041c\u0423\u041c|SUM|COUNT|AVG|MIN|MAX)\s*\(')
+    for item in _split_query_items(select_match.group(1)):
+        match = alias_re.match(item)
+        if match:
+            expr, alias = match.group(1), match.group(2)
+        else:
+            expr = item
+            simple = re.search(r'(' + _IDENT + r')\s*$', item)
+            if not simple:
+                continue
+            alias = simple.group(1)
+        expr_alias[_norm_query_expr(expr)] = alias
+        if aggregate_re.search(expr):
+            aggregate_aliases.add(alias.casefold())
+
+    group_aliases = set()
+    for expr in _split_query_items(group_match.group(1)):
+        alias = expr_alias.get(_norm_query_expr(expr))
+        if alias:
+            group_aliases.add(alias.casefold())
+        elif re.fullmatch(_IDENT, expr.strip()):
+            group_aliases.add(expr.strip().casefold())
+        else:
+            # At least one expression could not be mapped reliably: suppress this heuristic.
+            return set(), aggregate_aliases
+    return group_aliases, aggregate_aliases
+
+
+def _strip_bsl_comments(text):
+    result = []
+    for line in (text or '').splitlines():
+        out = []
+        in_string = False
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == '"':
+                out.append(ch)
+                if in_string and i + 1 < len(line) and line[i + 1] == '"':
+                    out.append(line[i + 1])
+                    i += 2
+                    continue
+                in_string = not in_string
+            elif not in_string and ch == '/' and i + 1 < len(line) and line[i + 1] == '/':
+                break
+            else:
+                out.append(ch)
+            i += 1
+        result.append(''.join(out))
+    return '\n'.join(result)
+
+
+def _bsl_routines(text):
+    clean = _strip_bsl_comments(text)
+    pattern = re.compile(
+        r'(?ims)^\s*(?:\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u0430|Procedure|\u0424\u0443\u043d\u043a\u0446\u0438\u044f|Function)\s+(' + _IDENT + r')\s*\([^)]*\)(.*?)'
+        r'^\s*(?:\u041a\u043e\u043d\u0435\u0446\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b|EndProcedure|\u041a\u043e\u043d\u0435\u0446\u0424\u0443\u043d\u043a\u0446\u0438\u0438|EndFunction)\b'
+    )
+    return {match.group(1).casefold(): (match.group(1), match.group(2)) for match in pattern.finditer(clean)}
+
+
+def _reachable_bsl_text(routines, handler):
+    """Handler plus local routines it calls (small call graph, no common-module guessing)."""
+    queue = [handler.casefold()]
+    seen = set()
+    bodies = []
+    while queue:
+        name = queue.pop(0)
+        if name in seen or name not in routines:
+            continue
+        seen.add(name)
+        body = routines[name][1]
+        bodies.append(body)
+        for called_key, (called_name, _called_body) in routines.items():
+            if called_key not in seen and re.search(r'(?i)(?<![A-Za-z0-9_\u0410-\u044f\u0401\u0451])' + re.escape(called_name) + r'\s*\(', body):
+                queue.append(called_key)
+    return '\n'.join(bodies)
+
+
+def _server_bsl_routine_names(text):
+    """Names of local form routines explicitly compiled on the server."""
+    clean = _strip_bsl_comments(text)
+    pattern = re.compile(
+        r'(?im)^\s*&\s*(?:\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435(?:\u0411\u0435\u0437\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u0430)?|AtServer(?:NoContext)?)\s*$\s*'
+        r'^\s*(?:\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u0430|Procedure|\u0424\u0443\u043d\u043a\u0446\u0438\u044f|Function)\s+(' + _IDENT + r')\s*\('
+    )
+    return {match.group(1).casefold() for match in pattern.finditer(clean)}
+
+
+def _routine_reaches_server(routines, name, server_names, memo, visiting=None):
+    """Best-effort local call-graph check; common-module calls stay intentionally unknown."""
+    key = name.casefold()
+    if key in memo:
+        return memo[key]
+    if key in server_names:
+        memo[key] = True
+        return True
+    if key not in routines:
+        memo[key] = False
+        return False
+    visiting = set() if visiting is None else set(visiting)
+    if key in visiting:
+        return False
+    visiting.add(key)
+    body = routines[key][1]
+    for called_key, (called_name, _called_body) in routines.items():
+        if re.search(r'(?i)(?<![A-Za-z0-9_\u0410-\u044f\u0401\u0451])' + re.escape(called_name) + r'\s*\(', body):
+            if _routine_reaches_server(routines, called_key, server_names, memo, visiting):
+                memo[key] = True
+                return True
+    memo[key] = False
+    return False
+
+
+def _first_server_call_position(routines, handler, server_names):
+    routine = routines.get(handler.casefold())
+    if routine is None:
+        return None
+    body = routine[1]
+    memo = {}
+    positions = []
+    for called_key, (called_name, _called_body) in routines.items():
+        if not _routine_reaches_server(routines, called_key, server_names, memo):
+            continue
+        call_re = re.compile(
+            r'(?i)(?<![A-Za-z0-9_\u0410-\u044f\u0401\u0451])' + re.escape(called_name) + r'\s*\('
+        )
+        positions.extend(match.start() for match in call_re.finditer(body))
+    return min(positions) if positions else None
+
+
+def _has_disabled_early_return(body, flag_name, first_server_call):
+    """Recognize the deliberately narrow `If Not Flag Then ... Return; EndIf` guard."""
+    flag = r'(?:\u042d\u0442\u0430\u0424\u043e\u0440\u043c\u0430\s*\.\s*|ThisForm\s*\.\s*)?' + re.escape(flag_name)
+    condition = r'(?:(?:\u041d\u0435|Not)\s+' + flag + r'|' + flag + r'\s*=\s*(?:\u041b\u043e\u0436\u044c|False))'
+    guard_re = re.compile(
+        r'(?is)\b(?:\u0415\u0441\u043b\u0438|If)\s+' + condition
+        + r'\s+(?:\u0422\u043e\u0433\u0434\u0430|Then)\b(.*?)\b(?:\u041a\u043e\u043d\u0435\u0446\u0415\u0441\u043b\u0438|EndIf)\b'
+    )
+    for match in guard_re.finditer(body or ''):
+        if match.start() >= first_server_call:
+            continue
+        return_match = re.search(r'(?i)\b(?:\u0412\u043e\u0437\u0432\u0440\u0430\u0442|Return)\s*;', match.group(1))
+        if return_match and match.end() <= first_server_call:
+            return True
+    return False
+
+
+def _dynamic_list_toggle_handlers(root, routines, bound_tables):
+    """Yield checkbox flag/handler pairs which explicitly control this list's visibility."""
+    controlled_names = set()
+    for table in bound_tables:
+        node = table
+        while node is not None and node is not root:
+            if isinstance(node.tag, str) and node.get('name'):
+                controlled_names.add(node.get('name').casefold())
+            node = node.getparent()
+    if not controlled_names:
+        return []
+
+    result = []
+    for checkbox in root.xpath('./f:ChildItems//f:CheckBoxField', namespaces=NSMAP):
+        flag_name = _direct_text(checkbox, 'DataPath')
+        if not flag_name:
+            continue
+        for event in checkbox.xpath('./f:Events/f:Event', namespaces=NSMAP):
+            if (event.get('name') or '').casefold() not in ('onchange', '\u043f\u0440\u0438\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438'):
+                continue
+            handler = (event.text or '').strip()
+            routine = routines.get(handler.casefold())
+            if not routine:
+                continue
+            body = routine[1]
+            controls_visibility = False
+            for element_name in controlled_names:
+                pattern = (
+                    r'(?i)(?:\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u044b|Items)\s*\.\s*' + re.escape(element_name)
+                    + r'\s*\.\s*(?:\u0412\u0438\u0434\u0438\u043c\u043e\u0441\u0442\u044c|Visible)\s*='
+                )
+                if re.search(pattern, body):
+                    controls_visibility = True
+                    break
+            if controls_visibility:
+                result.append((flag_name, handler, body))
+    return result
+
+
+def _node_initially_hidden(node, root):
+    current = node
+    while current is not None and current is not root:
+        visible = current.find(f'{{{F_NS}}}Visible')
+        if visible is not None and (visible.text or '').strip().casefold() == 'false':
+            return True
+        current = current.getparent()
+    return False
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -973,6 +1253,223 @@ def main():
                          '— a dump carries one version, the platform refuses a file it cannot read')
         else:
             report_ok(f'14. Format version: {form_ver}, matches the dump')
+
+    # --- Check 15: added arbitrary DynamicList semantics and lifecycle ---
+    # A parameterized list which is visible while the form opens is read before a later client
+    # event can initialize its query parameters.  1C then raises a runtime error although the XML
+    # and /CheckConfig are both clean.  Only extension-added attributes are subject to the lifecycle
+    # heuristic: changing assumptions for a borrowed base list would create a large false-positive
+    # surface.  Key-shape checks are structural and apply to every root-level arbitrary list.
+    if not stopped:
+        semantic_checked = 0
+        semantic_errors_before = errors
+        semantic_warnings_before = warnings
+
+        base_attr_names = set()
+        if base_form_node is not None:
+            for base_attr in base_form_node.findall(f'{{{F_NS}}}Attributes/{{{F_NS}}}Attribute'):
+                if base_attr.get('name'):
+                    base_attr_names.add(base_attr.get('name').casefold())
+
+        module_path = os.path.join(os.path.dirname(form_path), 'Form', 'Module.bsl')
+        module_text = ''
+        if os.path.isfile(module_path):
+            with open(module_path, 'r', encoding='utf-8-sig') as module_file:
+                module_text = module_file.read()
+        routines = _bsl_routines(module_text)
+        server_routine_names = _server_bsl_routine_names(module_text)
+        all_routine_text = '\n'.join(body for _name, body in routines.values())
+        checked_toggle_handlers = set()
+
+        on_create_handlers = []
+        events_node = root.find(f'{{{F_NS}}}Events')
+        if events_node is not None:
+            for event in events_node.findall(f'{{{F_NS}}}Event'):
+                if (event.get('name') or '').casefold() in ('oncreateatserver', '\u043f\u0440\u0438\u0441\u043e\u0437\u0434\u0430\u043d\u0438\u0438\u043d\u0430\u0441\u0435\u0440\u0432\u0435\u0440\u0435') and (event.text or '').strip():
+                    on_create_handlers.append((event.text or '').strip())
+        on_create_text = '\n'.join(_reachable_bsl_text(routines, handler) for handler in on_create_handlers)
+
+        for attr in attr_nodes:
+            attr_name = attr.get('name', '')
+            type_values = [str(value).strip() for value in attr.xpath('./f:Type/v8:Type/text()', namespaces=NSMAP)]
+            if 'cfg:DynamicList' not in type_values:
+                continue
+            settings = attr.find(f'{{{F_NS}}}Settings')
+            if settings is None or _direct_text(settings, 'ManualQuery').casefold() != 'true':
+                continue
+            semantic_checked += 1
+            query = _direct_text(settings, 'QueryText')
+            main_table = _direct_text(settings, 'MainTable')
+            key_type = _direct_text(settings, 'KeyType')
+            key_fields = [
+                (node.text or '').strip() for node in settings.findall(f'{{{F_NS}}}KeyField')
+                if (node.text or '').strip()
+            ]
+            key_folded = [value.casefold() for value in key_fields]
+
+            if not main_table:
+                if not key_type:
+                    report_error(f"15. DynamicList '{attr_name}': arbitrary query without MainTable needs KeyType")
+                elif key_type not in ('RowKey', 'FieldValue', 'RowNumber', 'Auto'):
+                    report_error(f"15. DynamicList '{attr_name}': unsupported KeyType '{key_type}'")
+                elif key_type in ('RowKey', 'FieldValue') and not key_fields:
+                    report_error(f"15. DynamicList '{attr_name}': KeyType={key_type} needs at least one KeyField")
+                elif key_type == 'FieldValue' and len(key_fields) != 1:
+                    report_error(f"15. DynamicList '{attr_name}': KeyType=FieldValue needs exactly one KeyField")
+                elif key_type == 'RowNumber' and key_fields:
+                    report_warn(f"15. DynamicList '{attr_name}': KeyField is ignored for KeyType=RowNumber")
+
+                duplicate_keys = sorted({value for value in key_folded if key_folded.count(value) > 1})
+                if duplicate_keys:
+                    report_error(f"15. DynamicList '{attr_name}': duplicate KeyField(s): {', '.join(duplicate_keys)}")
+
+                explicit_fields = {
+                    (value or '').strip().casefold()
+                    for value in settings.xpath('./f:Field/*[local-name()="dataPath"]/text()', namespaces=NSMAP)
+                    if (value or '').strip()
+                }
+                if explicit_fields:
+                    unknown_keys = [value for value in key_fields if value.casefold() not in explicit_fields]
+                    if unknown_keys:
+                        report_error(f"15. DynamicList '{attr_name}': KeyField(s) absent from declared fields: {', '.join(unknown_keys)}")
+
+                group_aliases, aggregate_aliases = _aggregate_query_key_info(query)
+                key_set = set(key_folded)
+                if group_aliases:
+                    missing_group_keys = sorted(group_aliases - key_set)
+                    if missing_group_keys:
+                        report_warn(
+                            f"15. DynamicList '{attr_name}': aggregate query key omits GROUP BY field(s) "
+                            f"{', '.join(missing_group_keys)}; row uniqueness is not guaranteed"
+                        )
+                unstable_keys = sorted(aggregate_aliases & key_set)
+                if unstable_keys:
+                    report_warn(
+                        f"15. DynamicList '{attr_name}': aggregate result field(s) used as KeyField "
+                        f"({', '.join(unstable_keys)}); the row key changes with the aggregate"
+                    )
+
+            query_params = _query_parameters(query)
+            is_added = has_base_form and attr_name.casefold() not in base_attr_names
+            if not is_added or not query_params:
+                continue
+
+            bound_tables = []
+            for table in root.xpath('./f:ChildItems//f:Table', namespaces=NSMAP):
+                data_path = _direct_text(table, 'DataPath')
+                if data_path.casefold() == attr_name.casefold():
+                    bound_tables.append(table)
+            if not bound_tables:
+                continue
+
+            for flag_name, handler, handler_body in _dynamic_list_toggle_handlers(root, routines, bound_tables):
+                handler_key = handler.casefold()
+                if handler_key in checked_toggle_handlers:
+                    continue
+                checked_toggle_handlers.add(handler_key)
+                first_server_call = _first_server_call_position(routines, handler, server_routine_names)
+                if first_server_call is not None and not _has_disabled_early_return(
+                    handler_body, flag_name, first_server_call
+                ):
+                    report_warn(
+                        f"15. DynamicList '{attr_name}': checkbox handler '{handler}' can reach a local "
+                        f"server routine before a recognized disabled-state guard for '{flag_name}'; "
+                        "use `If Not <flag> Then ... Return; EndIf` before the server-bound call"
+                    )
+                if first_server_call is not None:
+                    show_re = re.compile(
+                        r'(?i)(?:\u0412\u0438\u0434\u0438\u043c\u043e\u0441\u0442\u044c|Visible)\s*=\s*'
+                        r'(?:\u0418\u0441\u0442\u0438\u043d\u0430|True|(?:\u042d\u0442\u0430\u0424\u043e\u0440\u043c\u0430\s*\.\s*|ThisForm\s*\.\s*)?'
+                        + re.escape(flag_name) + r')'
+                    )
+                    show_match = show_re.search(handler_body)
+                    if show_match and show_match.start() < first_server_call:
+                        report_warn(
+                            f"15. DynamicList '{attr_name}': checkbox handler '{handler}' makes the panel "
+                            "visible before the server-bound parameter initialization; initialize first, then show"
+                        )
+
+                    reachable_toggle_text = _reachable_bsl_text(routines, handler)
+                    for table in bound_tables:
+                        refresh_re = re.compile(
+                            r'(?i)(?:\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u044b|Items)\s*\.\s*'
+                            + re.escape(table.get('name', ''))
+                            + r'\s*\.\s*(?:\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c|Refresh)\s*\('
+                        )
+                        if refresh_re.search(reachable_toggle_text):
+                            report_warn(
+                                f"15. DynamicList '{attr_name}': checkbox path explicitly refreshes table "
+                                f"'{table.get('name', '')}' after/beside parameter initialization; changing "
+                                "DynamicList.Parameters already schedules reread, so verify and remove the extra refresh"
+                            )
+                            break
+
+            initially_hidden = all(_node_initially_hidden(table, root) for table in bound_tables)
+
+            # A schema parameter with a non-nil <value> is already initialized at design time.
+            defaulted = set()
+            for parameter in settings.findall(f'{{{F_NS}}}Parameter'):
+                names = parameter.xpath('./*[local-name()="name"]/text()')
+                values = parameter.xpath('./*[local-name()="value"]')
+                if not names or not values:
+                    continue
+                value_node = values[0]
+                is_nil = (value_node.get('{http://www.w3.org/2001/XMLSchema-instance}nil') or '').casefold() == 'true'
+                if not is_nil:
+                    defaulted.add((names[0] or '').strip().casefold())
+
+            def setter_found(text, parameter_name):
+                return bool(re.search(
+                    r'(?i)(?<![A-Za-z0-9_\u0410-\u044f\u0401\u0451])(?:\u042d\u0442\u0430\u0424\u043e\u0440\u043c\u0430\s*\.\s*|ThisForm\s*\.\s*)?'
+                    + re.escape(attr_name)
+                    + r'\s*\.\s*(?:\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b|Parameters)\s*\.\s*'
+                    + r'(?:\u0423\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u0430|SetParameterValue)\s*\(\s*"'
+                    + re.escape(parameter_name)
+                    + r'"',
+                    text or '',
+                ))
+
+            if initially_hidden:
+                missing_anywhere = [
+                    parameter for parameter in query_params
+                    if parameter.casefold() not in defaulted and not setter_found(all_routine_text, parameter)
+                ]
+                if missing_anywhere:
+                    report_warn(
+                        f"15. DynamicList '{attr_name}' is initially hidden, but no parameter setter was found "
+                        f"for: {', '.join(missing_anywhere)}; initialize before making the bound table visible"
+                    )
+                continue
+
+            missing_on_create = [
+                parameter for parameter in query_params
+                if parameter.casefold() not in defaulted and not setter_found(on_create_text, parameter)
+            ]
+            if missing_on_create:
+                table_names = ', '.join(table.get('name', '?') for table in bound_tables)
+                report_warn(
+                    f"15. DynamicList '{attr_name}' is initially visible in table(s) {table_names}, but "
+                    f"OnCreateAtServer does not initialize query parameter(s): {', '.join(missing_on_create)}; "
+                    "initialize them there or keep the table/ancestor Visible=false until initialization"
+                )
+
+            # Refresh during form creation performs a second/early read before the first display.
+            if on_create_text and any(setter_found(on_create_text, parameter) for parameter in query_params):
+                for table in bound_tables:
+                    table_name = table.get('name', '')
+                    refresh_re = re.compile(
+                        r'(?i)(?:\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u044b|Items)\s*\.\s*' + re.escape(table_name)
+                        + r'\s*\.\s*(?:\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c|Refresh)\s*\('
+                    )
+                    if refresh_re.search(on_create_text):
+                        report_warn(
+                            f"15. DynamicList '{attr_name}': explicit refresh of table '{table_name}' in "
+                            "OnCreateAtServer is redundant before the first display"
+                        )
+                        break
+
+        if semantic_checked and errors == semantic_errors_before and warnings == semantic_warnings_before:
+            report_ok(f'15. DynamicList semantics/lifecycle: {semantic_checked} arbitrary list(s) checked')
 
     # --- Finalize ---
     checks = ok_count + errors + warnings

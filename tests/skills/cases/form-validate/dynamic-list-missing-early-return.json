@@ -1,0 +1,18 @@
+{
+  "name": "Выключенный флажок DynamicList должен завершать клиентский обработчик до серверного вызова",
+  "setup": "fixture:dynamic-list-hidden-initialized",
+  "preRun": [
+    {
+      "writeFile": {
+        "path": "DataProcessors/Spec/Forms/Форма/Ext/Form/Module.bsl",
+        "content": "&НаКлиенте\nПроцедура ПоказыватьОстаткиПриИзменении(Элемент)\n\tЭлементы.ПанельОстатков.Видимость = ПоказыватьОстатки;\n\tОбновитьОстаткиДляСтроки();\n\tЭлементы.ТаблицаОстатков.Обновить();\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура ОбновитьОстаткиДляСтроки()\n\tПодготовитьОстатки();\nКонецПроцедуры\n\n&НаСервере\nПроцедура ПодготовитьОстатки()\n\tОстатки.Параметры.УстановитьЗначениеПараметра(\"Номенклатура\", Номенклатура);\nКонецПроцедуры\n"
+      }
+    }
+  ],
+  "noSnapshot": "Read-only validator case; the fixture itself is the input contract",
+  "params": { "formPath": "DataProcessors/Spec/Forms/Форма" },
+  "expect": {
+    "stdoutContains": ["can reach a local server routine before a recognized disabled-state guard", "makes the panel visible before the server-bound parameter initialization", "explicitly refreshes table 'ТаблицаОстатков'", "ПоказыватьОстаткиПриИзменении"],
+    "stdoutNotContains": "initially hidden, but no parameter setter"
+  }
+}

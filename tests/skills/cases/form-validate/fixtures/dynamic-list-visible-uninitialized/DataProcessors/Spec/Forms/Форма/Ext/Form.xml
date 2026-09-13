@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.17">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<ChildItems>
+		<Table name="ТаблицаОстатков" id="1000000">
+			<DataPath>Остатки</DataPath>
+			<ContextMenu name="ТаблицаОстатковКонтекстноеМеню" id="1000001"/>
+			<AutoCommandBar name="ТаблицаОстатковКоманднаяПанель" id="1000002"/>
+			<SearchStringAddition name="ТаблицаОстатковСтрокаПоиска" id="1000003"/>
+			<ViewStatusAddition name="ТаблицаОстатковСостояниеПросмотра" id="1000004"/>
+			<SearchControlAddition name="ТаблицаОстатковУправлениеПоиском" id="1000005"/>
+		</Table>
+	</ChildItems>
+	<Attributes>
+		<Attribute name="Остатки" id="1000000">
+			<Type>
+				<v8:Type>cfg:DynamicList</v8:Type>
+			</Type>
+			<Settings xsi:type="DynamicList">
+				<ManualQuery>true</ManualQuery>
+				<DynamicDataRead>false</DynamicDataRead>
+				<QueryText>ВЫБРАТЬ Остатки.Склад КАК Склад, Остатки.Помещение КАК Помещение, СУММА(Остатки.Количество) КАК Количество ИЗ РегистрНакопления.Остатки КАК Остатки ГДЕ Остатки.Номенклатура = &amp;Номенклатура СГРУППИРОВАТЬ ПО Остатки.Склад, Остатки.Помещение</QueryText>
+				<Field xsi:type="dcssch:DataSetFieldField">
+					<dcssch:dataPath>Склад</dcssch:dataPath>
+					<dcssch:field>Склад</dcssch:field>
+				</Field>
+				<Field xsi:type="dcssch:DataSetFieldField">
+					<dcssch:dataPath>Помещение</dcssch:dataPath>
+					<dcssch:field>Помещение</dcssch:field>
+				</Field>
+				<Field xsi:type="dcssch:DataSetFieldField">
+					<dcssch:dataPath>Количество</dcssch:dataPath>
+					<dcssch:field>Количество</dcssch:field>
+				</Field>
+				<KeyType>RowKey</KeyType>
+				<KeyField>Склад</KeyField>
+			</Settings>
+		</Attribute>
+	</Attributes>
+	<BaseForm version="2.17">
+		<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+		<ChildItems/>
+		<Attributes/>
+	</BaseForm>
+</Form>

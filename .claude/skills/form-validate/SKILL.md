@@ -12,6 +12,8 @@ allowed-tools:
 
 Проверяет Form.xml на структурные ошибки: уникальность ID, наличие companion-элементов, корректность ссылок DataPath и команд.
 
+Для добавленных в extension-форму произвольных `DynamicList` дополнительно проверяется устойчивость ключа и жизненный цикл. Видимый параметризованный список должен получить все параметры в `OnCreateAtServer`; альтернатива — начально скрыть таблицу/группу и показать её только после установки параметров. Для флажка, который управляет такой панелью, валидатор ищет клиентский early-return до локального вызова, достигающего серверной процедуры. Это эвристика по локальному call graph, а не замена runtime-проверки.
+
 ## Параметры
 
 | Параметр  | Обяз. | Умолч. | Описание                                |
@@ -26,4 +28,3 @@ allowed-tools:
 powershell.exe -NoProfile -File "${CLAUDE_SKILL_DIR}/scripts/form-validate.ps1" -FormPath "Catalogs/Номенклатура/Forms/ФормаЭлемента"
 powershell.exe -NoProfile -File "${CLAUDE_SKILL_DIR}/scripts/form-validate.ps1" -FormPath "src/МояОбработка/Forms/Форма/Ext/Form.xml"
 ```
-

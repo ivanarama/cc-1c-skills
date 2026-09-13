@@ -358,6 +358,130 @@ def esc_xml_text(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+# DynamicList preflight -----------------------------------------------------
+# form-edit emits Form.xml only.  A parameterized arbitrary DynamicList which
+# is visible on the first form read needs matching BSL initialization before
+# that read; catching the risky layout here is substantially earlier than a
+# runtime failure in 1C.  This is deliberately a small query heuristic rather
+# than a full parser: unsupported constructs simply suppress aggregate advice.
+_DL_IDENT = r'[A-Za-z\u0410-\u042F\u0401\u0430-\u044F\u0451_][A-Za-z0-9\u0410-\u042F\u0401\u0430-\u044F\u0451_]*'
+
+
+def _dl_query_text(settings):
+    query = str(settings.get("query") or "")
+    if query.startswith("@"):
+        query_path = os.path.join(os.path.dirname(os.path.abspath(json_path)), query[1:])
+        try:
+            with open(query_path, encoding="utf-8-sig") as query_file:
+                query = query_file.read()
+        except OSError:
+            # The normal emitter owns file diagnostics; do not change them here.
+            return ""
+    return "\n".join(re.sub(r"^(\s*)\|\s?", r"\1", line) for line in query.splitlines())
+
+
+def _dl_query_parameters(query):
+    result = []
+    seen = set()
+    for match in re.finditer(r'&(' + _DL_IDENT + r')', query or ''):
+        name = match.group(1)
+        folded = name.casefold()
+        if folded not in seen:
+            seen.add(folded)
+            result.append(name)
+    return result
+
+
+def _dl_split_query_items(text):
+    result, current = [], []
+    depth = 0
+    in_string = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            current.append(char)
+            if in_string and index + 1 < len(text) and text[index + 1] == '"':
+                current.append(text[index + 1])
+                index += 2
+                continue
+            in_string = not in_string
+        elif not in_string and char == '(':
+            depth += 1
+            current.append(char)
+        elif not in_string and char == ')':
+            depth = max(0, depth - 1)
+            current.append(char)
+        elif not in_string and depth == 0 and char == ',':
+            item = ''.join(current).strip()
+            if item:
+                result.append(item)
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    item = ''.join(current).strip()
+    if item:
+        result.append(item)
+    return result
+
+
+def _dl_aggregate_key_info(query):
+    aggregate_pattern = r'(?i)\b(?:\u0421\u0423\u041c\u041c\u0410|\u041a\u041e\u041b\u0418\u0427\u0415\u0421\u0422\u0412\u041e|\u0421\u0420\u0415\u0414\u041d\u0415\u0415|\u041c\u0418\u041d\u0418\u041c\u0423\u041c|\u041c\u0410\u041a\u0421\u0418\u041c\u0423\u041c|SUM|COUNT|AVG|MIN|MAX)\s*\('
+    if not re.search(aggregate_pattern, query or ''):
+        return set(), set()
+    if re.search(r'(?i)\b(?:\u041e\u0411\u042a\u0415\u0414\u0418\u041d\u0418\u0422\u042c|UNION)\b', query):
+        return set(), set()
+    select_match = re.search(r'(?is)\b(?:\u0412\u042b\u0411\u0420\u0410\u0422\u042c|SELECT)\b(.*?)\b(?:\u0418\u0417|FROM)\b', query)
+    group_match = re.search(
+        r'(?is)\b(?:\u0421\u0413\u0420\u0423\u041f\u041f\u0418\u0420\u041e\u0412\u0410\u0422\u042c\s+\u041f\u041e|GROUP\s+BY)\b(.*?)'
+        r'(?=\b(?:\u0418\u041c\u0415\u042e\u0429\u0418\u0415|HAVING|\u0423\u041f\u041e\u0420\u042f\u0414\u041e\u0427\u0418\u0422\u042c\s+\u041f\u041e|ORDER\s+BY|\u0418\u0422\u041e\u0413\u0418|TOTALS)\b|$)',
+        query,
+    )
+    if not select_match or not group_match:
+        return set(), set()
+
+    normalize = lambda value: re.sub(r'\s+', '', value or '').casefold()
+    alias_pattern = re.compile(r'(?is)^(.*?)\s+(?:\u041a\u0410\u041a|AS)\s+(' + _DL_IDENT + r')\s*$')
+    aggregate_re = re.compile(aggregate_pattern)
+    aliases_by_expression = {}
+    aggregate_aliases = set()
+    for item in _dl_split_query_items(select_match.group(1)):
+        alias_match = alias_pattern.match(item)
+        if alias_match:
+            expression, alias = alias_match.group(1), alias_match.group(2)
+        else:
+            expression = item
+            simple = re.search(r'(' + _DL_IDENT + r')\s*$', item)
+            if not simple:
+                continue
+            alias = simple.group(1)
+        aliases_by_expression[normalize(expression)] = alias
+        if aggregate_re.search(expression):
+            aggregate_aliases.add(alias.casefold())
+
+    group_aliases = set()
+    for expression in _dl_split_query_items(group_match.group(1)):
+        alias = aliases_by_expression.get(normalize(expression))
+        if alias:
+            group_aliases.add(alias.casefold())
+        elif re.fullmatch(_DL_IDENT, expression.strip()):
+            group_aliases.add(expression.strip().casefold())
+        else:
+            return set(), aggregate_aliases
+    return group_aliases, aggregate_aliases
+
+
+def _dl_xml_node_hidden(node):
+    while node is not None:
+        if isinstance(node.tag, str):
+            visible = node.find(f'{{{FORM_NS}}}Visible')
+            if visible is not None and (visible.text or '').strip().casefold() == 'false':
+                return True
+        node = node.getparent()
+    return False
+
+
 # ── 1. Load Form.xml ────────────────────────────────────────
 
 if not os.path.exists(form_path):
@@ -1278,6 +1402,138 @@ def import_element_nodes(frag_root):
         if isinstance(child.tag, str):
             nodes.append(child)
     return nodes
+
+
+# Validate newly declared arbitrary lists before changing the XML.  The normal
+# form validator repeats these checks on the resulting file and can additionally
+# inspect Module.bsl; here we can still reject an unusable key and point out the
+# visible-before-initialization trap while the JSON intent is available.
+def _preflight_dynamic_lists():
+    attrs = defn.get("attributes") or []
+    dynamic_attrs = [
+        attr for attr in attrs
+        if str(attr.get("type") or "").casefold() == "dynamiclist" and attr.get("settings")
+    ]
+    if not dynamic_attrs:
+        return
+
+    insertion_node = root_ci
+    if root_ci is not None and defn.get("into"):
+        insertion_node = find_element(root_ci, str(defn["into"]))
+    elif root_ci is not None and defn.get("after"):
+        sibling = find_element(root_ci, str(defn["after"]))
+        if sibling is not None:
+            insertion_node = sibling.getparent()
+    inherited_hidden = _dl_xml_node_hidden(insertion_node) if insertion_node is not None else False
+
+    added_tables = []
+
+    def walk_element(element, parent_hidden):
+        hidden = parent_hidden or element.get("visible") is False or element.get("hidden") is True
+        if element.get("table") is not None:
+            added_tables.append((
+                get_element_name(element, "table"),
+                str(element.get("path") or ""),
+                hidden,
+            ))
+        for child in element.get("children") or []:
+            walk_element(child, hidden)
+        for column in element.get("columns") or []:
+            walk_element(column, hidden)
+
+    for element in defn.get("elements") or []:
+        walk_element(element, inherited_hidden)
+
+    existing_tables = []
+    for table in root.xpath('./f:ChildItems//f:Table', namespaces=NS):
+        data_path = table.find(f'{{{FORM_NS}}}DataPath')
+        existing_tables.append((
+            table.get("name", "?"),
+            (data_path.text or "").strip() if data_path is not None else "",
+            _dl_xml_node_hidden(table),
+        ))
+
+    has_errors = False
+    for attr in dynamic_attrs:
+        attr_name = str(attr.get("name") or "?")
+        settings = attr["settings"]
+        query = _dl_query_text(settings)
+        if not query.strip():
+            continue
+
+        main_table = str(settings.get("mainTable") or "").strip()
+        key_type = str(settings.get("keyType") or "").strip()
+        key_fields = [str(value).strip() for value in settings.get("keyFields") or [] if str(value).strip()]
+        key_folded = [value.casefold() for value in key_fields]
+
+        if not main_table:
+            if not key_type:
+                print(f"[ERROR] DynamicList '{attr_name}': arbitrary query without mainTable needs keyType")
+                has_errors = True
+            elif key_type not in ("RowKey", "FieldValue", "RowNumber", "Auto"):
+                print(f"[ERROR] DynamicList '{attr_name}': unsupported keyType '{key_type}'")
+                has_errors = True
+            elif key_type in ("RowKey", "FieldValue") and not key_fields:
+                print(f"[ERROR] DynamicList '{attr_name}': keyType={key_type} needs at least one keyField")
+                has_errors = True
+            elif key_type == "FieldValue" and len(key_fields) != 1:
+                print(f"[ERROR] DynamicList '{attr_name}': keyType=FieldValue needs exactly one keyField")
+                has_errors = True
+            elif key_type == "RowNumber" and key_fields:
+                print(f"[WARN] DynamicList '{attr_name}': keyFields are ignored for keyType=RowNumber")
+
+            duplicate_keys = sorted({value for value in key_folded if key_folded.count(value) > 1})
+            if duplicate_keys:
+                print(f"[ERROR] DynamicList '{attr_name}': duplicate keyField(s): {', '.join(duplicate_keys)}")
+                has_errors = True
+
+            explicit_fields = set()
+            for field in settings.get("fields") or []:
+                field_name = field if isinstance(field, str) else field.get("field") or ""
+                if str(field_name).strip():
+                    explicit_fields.add(str(field_name).strip().casefold())
+            if explicit_fields:
+                unknown_keys = [value for value in key_fields if value.casefold() not in explicit_fields]
+                if unknown_keys:
+                    print(f"[ERROR] DynamicList '{attr_name}': keyField(s) absent from fields: {', '.join(unknown_keys)}")
+                    has_errors = True
+
+            group_aliases, aggregate_aliases = _dl_aggregate_key_info(query)
+            key_set = set(key_folded)
+            missing_group_keys = sorted(group_aliases - key_set)
+            if missing_group_keys:
+                print(
+                    f"[WARN] DynamicList '{attr_name}': aggregate query key omits GROUP BY field(s) "
+                    f"{', '.join(missing_group_keys)}; row uniqueness is not guaranteed"
+                )
+            unstable_keys = sorted(aggregate_aliases & key_set)
+            if unstable_keys:
+                print(
+                    f"[WARN] DynamicList '{attr_name}': aggregate result field(s) used as keyField "
+                    f"({', '.join(unstable_keys)}); the row key changes with the aggregate"
+                )
+
+        query_parameters = _dl_query_parameters(query)
+        if query_parameters:
+            bound_tables = [
+                table for table in existing_tables + added_tables
+                if table[1].casefold() == attr_name.casefold()
+            ]
+            visible_tables = [table[0] for table in bound_tables if not table[2]]
+            if visible_tables:
+                print(
+                    f"[WARN] DynamicList '{attr_name}': parameterized query "
+                    f"({', '.join(query_parameters)}) is bound to initially visible table(s) "
+                    f"{', '.join(visible_tables)}; initialize every parameter in OnCreateAtServer "
+                    "or make the table/ancestor visible=false. form-edit changes Form.xml only; "
+                    "it does not generate BSL."
+                )
+
+    if has_errors:
+        sys.exit(1)
+
+
+_preflight_dynamic_lists()
 
 
 # ── 10. Add elements ────────────────────────────────────────

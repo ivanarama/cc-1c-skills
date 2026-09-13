@@ -1,0 +1,43 @@
+{
+  "name": "Параметризованный DynamicList в видимой таблице — раннее предупреждение о BSL-инициализации",
+  "preRun": [
+    {
+      "script": "meta-compile/scripts/meta-compile",
+      "input": { "type": "DataProcessor", "name": "ДинамическийСписок" },
+      "args": { "-JsonPath": "{inputFile}", "-OutputDir": "{workDir}" }
+    },
+    {
+      "script": "form-add/scripts/form-add",
+      "args": { "-ObjectPath": "{workDir}/DataProcessors/ДинамическийСписок.xml", "-FormName": "Форма" }
+    },
+    {
+      "script": "form-compile/scripts/form-compile",
+      "input": {
+        "title": "Динамический список",
+        "attributes": [{ "name": "Объект", "type": "DataProcessorObject.ДинамическийСписок", "main": true }]
+      },
+      "args": { "-JsonPath": "{inputFile}", "-OutputPath": "{workDir}/DataProcessors/ДинамическийСписок/Forms/Форма/Ext/Form.xml" }
+    }
+  ],
+  "params": { "formPath": "DataProcessors/ДинамическийСписок/Forms/Форма/Ext/Form.xml" },
+  "noSnapshot": "Diagnostic-only preflight case; form-edit output is covered by its structural cases",
+  "input": {
+    "attributes": [
+      {
+        "name": "Остатки",
+        "type": "DynamicList",
+        "settings": {
+          "query": "ВЫБРАТЬ Остатки.Склад КАК Склад ИЗ РегистрНакопления.Остатки КАК Остатки ГДЕ Остатки.Номенклатура = &Номенклатура",
+          "dynamicDataRead": false,
+          "fields": [{ "field": "Склад" }],
+          "keyType": "RowKey",
+          "keyFields": ["Склад"]
+        }
+      }
+    ],
+    "elements": [{ "table": "ТаблицаОстатков", "path": "Остатки" }]
+  },
+  "expect": {
+    "stdoutContains": ["parameterized query (Номенклатура)", "initially visible table(s) ТаблицаОстатков", "does not generate BSL"]
+  }
+}

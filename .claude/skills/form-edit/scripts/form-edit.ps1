@@ -1049,6 +1049,159 @@ function Import-ElementNodes($fragDoc) {
 	return $nodes
 }
 
+# --- DynamicList preflight ---
+# form-edit writes Form.xml only. Catch invalid arbitrary-list keys before the
+# first mutation and warn when JSON makes a parameterized list visible before
+# its BSL initialization can run.
+$script:dlEditIdentPattern = '[A-Za-z\u0410-\u042F\u0401\u0430-\u044F\u0451_][A-Za-z0-9\u0410-\u042F\u0401\u0430-\u044F\u0451_]*'
+
+function Get-DlEditQueryText($settings) {
+	$query = if ($settings.query) { "$($settings.query)" } else { '' }
+	if ($query.StartsWith('@')) {
+		$queryPath = Join-Path (Split-Path (Resolve-Path $JsonPath).Path -Parent) $query.Substring(1)
+		if (-not (Test-Path -LiteralPath $queryPath)) { return '' }
+		$query = Get-Content -LiteralPath $queryPath -Raw -Encoding UTF8
+	}
+	return (($query -split "`r?`n") | ForEach-Object { $_ -replace '^(\s*)\|\s?', '$1' }) -join "`n"
+}
+
+function Get-DlEditQueryParameters([string]$query) {
+	$result = New-Object System.Collections.Generic.List[string]
+	$seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+	foreach ($match in [regex]::Matches($query, '&(' + $script:dlEditIdentPattern + ')')) {
+		$name = $match.Groups[1].Value
+		if ($seen.Add($name)) { $result.Add($name) }
+	}
+	return @($result)
+}
+
+function Split-DlEditQueryItems([string]$text) {
+	$result = New-Object System.Collections.Generic.List[string]
+	$current = New-Object System.Text.StringBuilder
+	$depth = 0; $inString = $false
+	for ($index = 0; $index -lt $text.Length; $index++) {
+		$char = $text[$index]
+		if ($char -eq '"') {
+			[void]$current.Append($char)
+			if ($inString -and $index + 1 -lt $text.Length -and $text[$index + 1] -eq '"') {
+				[void]$current.Append($text[$index + 1]); $index++; continue
+			}
+			$inString = -not $inString
+		} elseif (-not $inString -and $char -eq '(') {
+			$depth++; [void]$current.Append($char)
+		} elseif (-not $inString -and $char -eq ')') {
+			if ($depth -gt 0) { $depth-- }; [void]$current.Append($char)
+		} elseif (-not $inString -and $depth -eq 0 -and $char -eq ',') {
+			$item = $current.ToString().Trim(); if ($item) { $result.Add($item) }; [void]$current.Clear()
+		} else { [void]$current.Append($char) }
+	}
+	$item = $current.ToString().Trim(); if ($item) { $result.Add($item) }
+	return @($result)
+}
+
+function Get-DlEditAggregateKeyInfo([string]$query) {
+	$empty = [pscustomobject]@{ GroupAliases = @(); AggregateAliases = @() }
+	$aggregatePattern = '(?i)\b(?:СУММА|КОЛИЧЕСТВО|СРЕДНЕЕ|МИНИМУМ|МАКСИМУМ|SUM|COUNT|AVG|MIN|MAX)\s*\('
+	if ($query -notmatch $aggregatePattern -or $query -match '(?i)\b(?:ОБЪЕДИНИТЬ|UNION)\b') { return $empty }
+	$selectMatch = [regex]::Match($query, '(?is)\b(?:ВЫБРАТЬ|SELECT)\b(.*?)\b(?:ИЗ|FROM)\b')
+	$groupMatch = [regex]::Match($query, '(?is)\b(?:СГРУППИРОВАТЬ\s+ПО|GROUP\s+BY)\b(.*?)(?=\b(?:ИМЕЮЩИЕ|HAVING|УПОРЯДОЧИТЬ\s+ПО|ORDER\s+BY|ИТОГИ|TOTALS)\b|$)')
+	if (-not $selectMatch.Success -or -not $groupMatch.Success) { return $empty }
+	$aliasesByExpression = @{}
+	$aggregateAliases = @{}
+	$aliasPattern = '(?is)^(.*?)\s+(?:КАК|AS)\s+(' + $script:dlEditIdentPattern + ')\s*$'
+	foreach ($item in @(Split-DlEditQueryItems $selectMatch.Groups[1].Value)) {
+		$aliasMatch = [regex]::Match($item, $aliasPattern)
+		if ($aliasMatch.Success) { $expression = $aliasMatch.Groups[1].Value; $alias = $aliasMatch.Groups[2].Value }
+		else {
+			$expression = $item; $simple = [regex]::Match($item, '(' + $script:dlEditIdentPattern + ')\s*$')
+			if (-not $simple.Success) { continue }; $alias = $simple.Groups[1].Value
+		}
+		$aliasesByExpression[(($expression -replace '\s+', '').ToLowerInvariant())] = $alias
+		if ($expression -match $aggregatePattern) { $aggregateAliases[$alias.ToLowerInvariant()] = $true }
+	}
+	$groupAliases = @{}
+	foreach ($expression in @(Split-DlEditQueryItems $groupMatch.Groups[1].Value)) {
+		$normalized = ($expression -replace '\s+', '').ToLowerInvariant()
+		if ($aliasesByExpression.ContainsKey($normalized)) { $groupAliases[$aliasesByExpression[$normalized].ToLowerInvariant()] = $true }
+		elseif ($expression.Trim() -match ('^' + $script:dlEditIdentPattern + '$')) { $groupAliases[$expression.Trim().ToLowerInvariant()] = $true }
+		else { return [pscustomobject]@{ GroupAliases = @(); AggregateAliases = @($aggregateAliases.Keys) } }
+	}
+	return [pscustomobject]@{ GroupAliases = @($groupAliases.Keys); AggregateAliases = @($aggregateAliases.Keys) }
+}
+
+function Test-DlEditXmlNodeHidden($node) {
+	while ($node) {
+		if ($node.NodeType -eq 'Element') {
+			$visible = $node.SelectSingleNode('f:Visible', $nsMgr)
+			if ($visible -and $visible.InnerText.Trim().ToLowerInvariant() -eq 'false') { return $true }
+		}
+		$node = $node.ParentNode
+	}
+	return $false
+}
+
+function Get-DlEditAddedTables($element, [bool]$parentHidden) {
+	$hidden = $parentHidden -or $element.visible -eq $false -or $element.hidden -eq $true
+	if ($null -ne $element.table) {
+		[pscustomobject]@{ Name = Get-ElementName -el $element -typeKey 'table'; Path = if ($element.path) { "$($element.path)" } else { '' }; Hidden = $hidden }
+	}
+	foreach ($child in @($element.children)) { if ($child) { Get-DlEditAddedTables $child $hidden } }
+	foreach ($column in @($element.columns)) { if ($column) { Get-DlEditAddedTables $column $hidden } }
+}
+
+function Invoke-DynamicListPreflight {
+	$dynamicAttrs = @($def.attributes | Where-Object { $_.type -and "$($_.type)".ToLowerInvariant() -eq 'dynamiclist' -and $_.settings })
+	if ($dynamicAttrs.Count -eq 0) { return }
+	$insertionNode = $rootCI
+	if ($rootCI -and $def.into) { $insertionNode = Find-Element $rootCI "$($def.into)" }
+	elseif ($rootCI -and $def.after) { $sibling = Find-Element $rootCI "$($def.after)"; if ($sibling) { $insertionNode = $sibling.ParentNode } }
+	$inheritedHidden = if ($insertionNode) { Test-DlEditXmlNodeHidden $insertionNode } else { $false }
+	$addedTables = @()
+	foreach ($element in @($def.elements)) { if ($element) { $addedTables += @(Get-DlEditAddedTables $element $inheritedHidden) } }
+	$existingTables = @()
+	foreach ($table in $root.SelectNodes('f:ChildItems//f:Table', $nsMgr)) {
+		$dataPath = $table.SelectSingleNode('f:DataPath', $nsMgr)
+		$existingTables += [pscustomobject]@{ Name = $table.GetAttribute('name'); Path = if ($dataPath) { $dataPath.InnerText.Trim() } else { '' }; Hidden = Test-DlEditXmlNodeHidden $table }
+	}
+	$hasErrors = $false
+	foreach ($attr in $dynamicAttrs) {
+		$attrName = if ($attr.name) { "$($attr.name)" } else { '?' }; $settings = $attr.settings; $query = Get-DlEditQueryText $settings
+		if (-not $query.Trim()) { continue }
+		$mainTable = if ($settings.mainTable) { "$($settings.mainTable)".Trim() } else { '' }
+		$keyType = if ($settings.keyType) { "$($settings.keyType)".Trim() } else { '' }
+		$keyFields = @($settings.keyFields | Where-Object { $_ -and "$($_)".Trim() } | ForEach-Object { "$($_)".Trim() })
+		if (-not $mainTable) {
+			if (-not $keyType) { Write-Host "[ERROR] DynamicList '${attrName}': arbitrary query without mainTable needs keyType"; $hasErrors = $true }
+			elseif (@('RowKey','FieldValue','RowNumber','Auto') -notcontains $keyType) { Write-Host "[ERROR] DynamicList '${attrName}': unsupported keyType '$keyType'"; $hasErrors = $true }
+			elseif (@('RowKey','FieldValue') -contains $keyType -and $keyFields.Count -eq 0) { Write-Host "[ERROR] DynamicList '${attrName}': keyType=$keyType needs at least one keyField"; $hasErrors = $true }
+			elseif ($keyType -eq 'FieldValue' -and $keyFields.Count -ne 1) { Write-Host "[ERROR] DynamicList '${attrName}': keyType=FieldValue needs exactly one keyField"; $hasErrors = $true }
+			elseif ($keyType -eq 'RowNumber' -and $keyFields.Count -gt 0) { Write-Host "[WARN] DynamicList '${attrName}': keyFields are ignored for keyType=RowNumber" -ForegroundColor Yellow }
+			$keyCounts = @{}; foreach ($keyField in $keyFields) { $folded = $keyField.ToLowerInvariant(); if (-not $keyCounts.ContainsKey($folded)) { $keyCounts[$folded] = 0 }; $keyCounts[$folded]++ }
+			$duplicateKeys = @($keyCounts.Keys | Where-Object { $keyCounts[$_] -gt 1 } | Sort-Object)
+			if ($duplicateKeys.Count -gt 0) { Write-Host "[ERROR] DynamicList '${attrName}': duplicate keyField(s): $($duplicateKeys -join ', ')"; $hasErrors = $true }
+			$explicitFields = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+			foreach ($field in @($settings.fields)) { if ($field) { $fieldName = if ($field -is [string]) { "$field" } else { "$($field.field)" }; if ($fieldName.Trim()) { [void]$explicitFields.Add($fieldName.Trim()) } } }
+			$unknownKeys = @($keyFields | Where-Object { $explicitFields.Count -gt 0 -and -not $explicitFields.Contains($_) })
+			if ($unknownKeys.Count -gt 0) { Write-Host "[ERROR] DynamicList '${attrName}': keyField(s) absent from fields: $($unknownKeys -join ', ')"; $hasErrors = $true }
+			$keyInfo = Get-DlEditAggregateKeyInfo $query
+			$keySet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase); foreach ($keyField in $keyFields) { [void]$keySet.Add($keyField) }
+			$missingGroupKeys = @($keyInfo.GroupAliases | Where-Object { -not $keySet.Contains($_) } | Sort-Object)
+			if ($missingGroupKeys.Count -gt 0) { Write-Host "[WARN] DynamicList '${attrName}': aggregate query key omits GROUP BY field(s) $($missingGroupKeys -join ', '); row uniqueness is not guaranteed" -ForegroundColor Yellow }
+			$unstableKeys = @($keyInfo.AggregateAliases | Where-Object { $keySet.Contains($_) } | Sort-Object)
+			if ($unstableKeys.Count -gt 0) { Write-Host "[WARN] DynamicList '${attrName}': aggregate result field(s) used as keyField ($($unstableKeys -join ', ')); the row key changes with the aggregate" -ForegroundColor Yellow }
+		}
+		$queryParameters = @(Get-DlEditQueryParameters $query)
+		if ($queryParameters.Count -gt 0) {
+			$boundTables = @(@($existingTables) + @($addedTables) | Where-Object { $_.Path -and $_.Path.Equals($attrName, [System.StringComparison]::OrdinalIgnoreCase) })
+			$visibleTables = @($boundTables | Where-Object { -not $_.Hidden } | ForEach-Object { $_.Name })
+			if ($visibleTables.Count -gt 0) { Write-Host "[WARN] DynamicList '${attrName}': parameterized query ($($queryParameters -join ', ')) is bound to initially visible table(s) $($visibleTables -join ', '); initialize every parameter in OnCreateAtServer or make the table/ancestor visible=false. form-edit changes Form.xml only; it does not generate BSL." -ForegroundColor Yellow }
+		}
+	}
+	if ($hasErrors) { exit 1 }
+}
+
+Invoke-DynamicListPreflight
+
 # === 10. Add elements ===
 
 $addedElems = @()

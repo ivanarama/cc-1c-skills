@@ -1,0 +1,41 @@
+{
+  "name": "Произвольный DynamicList с неполным агрегатным ключом и дублем keyField отклоняется до записи XML",
+  "preRun": [
+    {
+      "script": "meta-compile/scripts/meta-compile",
+      "input": { "type": "DataProcessor", "name": "ПлохойКлюч" },
+      "args": { "-JsonPath": "{inputFile}", "-OutputDir": "{workDir}" }
+    },
+    {
+      "script": "form-add/scripts/form-add",
+      "args": { "-ObjectPath": "{workDir}/DataProcessors/ПлохойКлюч.xml", "-FormName": "Форма" }
+    },
+    {
+      "script": "form-compile/scripts/form-compile",
+      "input": {
+        "title": "Плохой ключ",
+        "attributes": [{ "name": "Объект", "type": "DataProcessorObject.ПлохойКлюч", "main": true }]
+      },
+      "args": { "-JsonPath": "{inputFile}", "-OutputPath": "{workDir}/DataProcessors/ПлохойКлюч/Forms/Форма/Ext/Form.xml" }
+    }
+  ],
+  "params": { "formPath": "DataProcessors/ПлохойКлюч/Forms/Форма/Ext/Form.xml" },
+  "expectError": true,
+  "input": {
+    "attributes": [
+      {
+        "name": "Остатки",
+        "type": "DynamicList",
+        "settings": {
+          "query": "ВЫБРАТЬ Остатки.Склад КАК Склад, Остатки.Помещение КАК Помещение, СУММА(Остатки.Количество) КАК Количество ИЗ РегистрНакопления.Остатки КАК Остатки СГРУППИРОВАТЬ ПО Остатки.Склад, Остатки.Помещение",
+          "fields": [{ "field": "Склад" }, { "field": "Помещение" }, { "field": "Количество" }],
+          "keyType": "RowKey",
+          "keyFields": ["Склад", "Склад"]
+        }
+      }
+    ]
+  },
+  "expect": {
+    "stdoutContains": ["duplicate keyField(s): склад", "aggregate query key omits GROUP BY field(s) помещение"]
+  }
+}

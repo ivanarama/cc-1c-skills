@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.17">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<ChildItems>
+		<CheckBoxField name="ПоказыватьОстатки" id="1000010">
+			<DataPath>ПоказыватьОстатки</DataPath>
+			<ContextMenu name="ПоказыватьОстаткиКонтекстноеМеню" id="1000011"/>
+			<ExtendedTooltip name="ПоказыватьОстаткиРасширеннаяПодсказка" id="1000012"/>
+			<Events>
+				<Event name="OnChange">ПоказыватьОстаткиПриИзменении</Event>
+			</Events>
+		</CheckBoxField>
+		<UsualGroup name="ПанельОстатков" id="1000000">
+			<Visible>false</Visible>
+			<ChildItems>
+				<Table name="ТаблицаОстатков" id="1000002">
+					<DataPath>Остатки</DataPath>
+					<ContextMenu name="ТаблицаОстатковКонтекстноеМеню" id="1000003"/>
+					<AutoCommandBar name="ТаблицаОстатковКоманднаяПанель" id="1000004"/>
+					<SearchStringAddition name="ТаблицаОстатковСтрокаПоиска" id="1000005"/>
+					<ViewStatusAddition name="ТаблицаОстатковСостояниеПросмотра" id="1000006"/>
+					<SearchControlAddition name="ТаблицаОстатковУправлениеПоиском" id="1000007"/>
+				</Table>
+			</ChildItems>
+			<ExtendedTooltip name="ПанельОстатковРасширеннаяПодсказка" id="1000001"/>
+		</UsualGroup>
+	</ChildItems>
+	<Attributes>
+		<Attribute name="ПоказыватьОстатки" id="1000010">
+			<Type>
+				<v8:Type>xs:boolean</v8:Type>
+			</Type>
+		</Attribute>
+		<Attribute name="Остатки" id="1000000">
+			<Type>
+				<v8:Type>cfg:DynamicList</v8:Type>
+			</Type>
+			<Settings xsi:type="DynamicList">
+				<ManualQuery>true</ManualQuery>
+				<DynamicDataRead>false</DynamicDataRead>
+				<QueryText>ВЫБРАТЬ Остатки.Склад КАК Склад ИЗ РегистрНакопления.Остатки КАК Остатки ГДЕ Остатки.Номенклатура = &amp;Номенклатура</QueryText>
+				<Field xsi:type="dcssch:DataSetFieldField">
+					<dcssch:dataPath>Склад</dcssch:dataPath>
+					<dcssch:field>Склад</dcssch:field>
+				</Field>
+				<KeyType>RowKey</KeyType>
+				<KeyField>Склад</KeyField>
+			</Settings>
+		</Attribute>
+	</Attributes>
+	<BaseForm version="2.17">
+		<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+		<ChildItems/>
+		<Attributes/>
+	</BaseForm>
+</Form>

@@ -1,0 +1,9 @@
+{
+  "name": "Добавленный параметризованный DynamicList нельзя оставлять видимым без инициализации при создании формы",
+  "setup": "fixture:dynamic-list-visible-uninitialized",
+  "noSnapshot": "Read-only validator case; the fixture itself is the input contract",
+  "params": { "formPath": "DataProcessors/Spec/Forms/Форма" },
+  "expect": {
+    "stdoutContains": ["aggregate query key omits GROUP BY field(s) помещение", "initially visible in table(s) ТаблицаОстатков", "OnCreateAtServer does not initialize query parameter(s): Номенклатура"]
+  }
+}

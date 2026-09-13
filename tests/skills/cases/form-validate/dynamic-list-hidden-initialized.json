@@ -1,0 +1,10 @@
+{
+  "name": "Скрытый параметризованный DynamicList с отложенной инициализацией не даёт lifecycle-предупреждения",
+  "setup": "fixture:dynamic-list-hidden-initialized",
+  "noSnapshot": "Read-only validator case; the fixture itself is the input contract",
+  "params": { "formPath": "DataProcessors/Spec/Forms/Форма" },
+  "expect": {
+    "stdoutContains": "Validation OK: Form.Форма",
+    "stdoutNotContains": ["initially visible", "initially hidden, but no parameter setter", "before a recognized disabled-state guard"]
+  }
+}

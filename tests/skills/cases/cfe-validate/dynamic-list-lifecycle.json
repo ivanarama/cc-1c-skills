@@ -1,0 +1,66 @@
+{
+  "name": "CFE: добавленный агрегатный параметризованный DynamicList проверяет ключ и инициализацию до первого показа",
+  "preRun": [
+    {
+      "script": "meta-compile/scripts/meta-compile",
+      "input": { "type": "Catalog", "name": "Товары" },
+      "args": { "-JsonPath": "{inputFile}", "-OutputDir": "{workDir}" }
+    },
+    {
+      "script": "form-add/scripts/form-add",
+      "args": { "-ObjectPath": "{workDir}/Catalogs/Товары.xml", "-FormName": "ФормаСписка", "-Purpose": "List" }
+    },
+    {
+      "script": "form-compile/scripts/form-compile",
+      "input": {
+        "title": "Товары",
+        "attributes": [{ "name": "Список", "type": "DynamicList", "main": true, "settings": { "mainTable": "Catalog.Товары" } }],
+        "elements": [{ "table": "Список", "path": "Список" }]
+      },
+      "args": { "-JsonPath": "{inputFile}", "-OutputPath": "{workDir}/Catalogs/Товары/Forms/ФормаСписка/Ext/Form.xml" }
+    },
+    {
+      "script": "cfe-init/scripts/cfe-init",
+      "args": { "-Name": "ПроверкаСписка", "-OutputDir": "{workDir}/cfe", "-ConfigPath": "{workDir}" }
+    },
+    {
+      "script": "cfe-borrow/scripts/cfe-borrow",
+      "args": { "-ExtensionPath": "{workDir}/cfe", "-ConfigPath": "{workDir}", "-Object": "Catalog.Товары.Form.ФормаСписка", "-BorrowMainAttribute": "Form" }
+    },
+    {
+      "script": "form-edit/scripts/form-edit",
+      "input": {
+        "attributes": [
+          { "name": "ПоказыватьОстатки", "type": "boolean" },
+          {
+            "name": "Остатки",
+            "type": "DynamicList",
+            "settings": {
+              "query": "ВЫБРАТЬ Остатки.Склад КАК Склад, Остатки.Помещение КАК Помещение, СУММА(Остатки.Количество) КАК Количество ИЗ РегистрНакопления.Остатки КАК Остатки ГДЕ Остатки.Номенклатура = &Номенклатура СГРУППИРОВАТЬ ПО Остатки.Склад, Остатки.Помещение",
+              "dynamicDataRead": false,
+              "fields": [{ "field": "Склад" }, { "field": "Помещение" }, { "field": "Количество" }],
+              "keyType": "RowKey",
+              "keyFields": ["Склад"]
+            }
+          }
+        ],
+        "elements": [
+          { "check": "ПоказыватьОстатки", "path": "ПоказыватьОстатки", "on": [{ "event": "OnChange", "handler": "ПоказыватьОстаткиПриИзменении" }] },
+          { "group": "ПанельОстатков", "visible": false, "children": [{ "table": "ТаблицаОстатков", "path": "Остатки" }] }
+        ]
+      },
+      "args": { "-FormPath": "{workDir}/cfe/Catalogs/Товары/Forms/ФормаСписка/Ext/Form.xml", "-JsonPath": "{inputFile}" }
+    },
+    {
+      "writeFile": {
+        "path": "cfe/Catalogs/Товары/Forms/ФормаСписка/Ext/Form/Module.bsl",
+        "content": "&НаКлиенте\nПроцедура ПоказыватьОстаткиПриИзменении(Элемент)\n\tЭлементы.ПанельОстатков.Видимость = ПоказыватьОстатки;\n\tОбновитьОстаткиДляСтроки();\n\tЭлементы.ТаблицаОстатков.Обновить();\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура ОбновитьОстаткиДляСтроки()\n\tПодготовитьОстатки();\nКонецПроцедуры\n\n&НаСервере\nПроцедура ПодготовитьОстатки()\n\tОстатки.Параметры.УстановитьЗначениеПараметра(\"Номенклатура\", Номенклатура);\nКонецПроцедуры\n"
+      }
+    }
+  ],
+  "params": { "extensionPath": "cfe" },
+  "noSnapshot": "Read-only validator diagnostic; cfe generation and borrowing have dedicated snapshot cases",
+  "expect": {
+    "stdoutContains": ["aggregate key omits GROUP BY field(s) помещение", "can reach a local server routine before a recognized disabled-state guard", "makes the panel visible before the server-bound parameter initialization", "explicitly refreshes table 'ТаблицаОстатков'", "ПоказыватьОстаткиПриИзменении"]
+  }
+}
