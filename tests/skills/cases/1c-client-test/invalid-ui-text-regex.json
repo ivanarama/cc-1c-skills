@@ -1,0 +1,12 @@
+{
+  "name": "Некорректное выражение assertNoUiText отклоняется до запуска",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": [
+      { "type": "assertNoUiText", "pattern": "[незакрытая группа" }
+    ]
+  },
+  "expectError": "invalid regex in 'pattern'",
+  "noSnapshot": "негативная офлайн-проверка"
+}

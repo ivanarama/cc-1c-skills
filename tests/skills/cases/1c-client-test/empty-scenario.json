@@ -1,0 +1,12 @@
+{
+  "name": "Пустой сценарий допустим для диагностического запуска",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": []
+  },
+  "expect": {
+    "stdoutContains": "[OK] Scenario is valid (0 actions)."
+  },
+  "noSnapshot": "проверяется граничный случай пустого диагностического сценария"
+}

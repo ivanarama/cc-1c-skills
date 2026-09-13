@@ -13,9 +13,12 @@ param(
     [ValidateRange(0, 3600)]
     [int]$WaitReadySeconds = 300,
     [int]$AttachProcessId = 0,
+    [ValidateRange(1, 1000000)]
+    [int]$StartAtAction = 1,
     [string]$ScenarioPath,
     [string]$OutputDir,
     [switch]$KeepClient,
+    [switch]$CloseClientOnFailure,
     [switch]$DisableStartupDialogs,
     [switch]$IncludeEventLog,
     [switch]$IncludeTechLog,
@@ -273,6 +276,7 @@ function Find-NearestUiEntry {
     $anchorRight = $anchor.Entry.Left + $anchor.Entry.Width
     $anchorBottom = $anchor.Entry.Top + $anchor.Entry.Height
     $candidates = @(Get-UiEntries $anchor.Window.Handle | Where-Object {
+        -not [Windows.Automation.Automation]::Compare($_.Element, $anchor.Entry.Element) -and
         (-not $TargetName -or (Normalize-UiCaption $_.Name).Equals($normalizedTargetName, [StringComparison]::OrdinalIgnoreCase)) -and
         (-not $ControlType -or $_.ControlType -eq $ControlType) -and
         (-not $Pattern -or $_.Patterns -contains $Pattern) -and
@@ -491,7 +495,8 @@ function Test-ClientTestScenario {
     $supported = @(
         'wait','screenshot','dumpUi','assertWindow','assertNoWindow','dismissWindow',
         'invoke','select','clickElement','clickNearest','assertNearest','assertNoNearest',
-        'toggle','assertToggle','assertElement','assertNoElement','clickRelative','sendKeys'
+        'toggle','assertToggle','assertElement','assertNoElement','assertUiText','assertNoUiText',
+        'clickRelative','sendKeys'
     )
     $actions = @($Scenario.actions)
     for ($index = 0; $index -lt $actions.Count; $index++) {
@@ -519,6 +524,10 @@ function Test-ClientTestScenario {
             Test-ClientTestRegex ([string](Get-OptionalProperty $action 'title' '.*')) 'title' $number
             Test-ClientTestRegex ([string](Get-OptionalProperty $action 'containsElement' '')) 'containsElement' $number
         }
+        if ($type -in @('assertUiText','assertNoUiText')) {
+            $textPattern = Get-RequiredClientTestText $action 'pattern' $number
+            Test-ClientTestRegex $textPattern 'pattern' $number
+        }
         if ($type -eq 'dismissWindow') {
             $dismissTitle = [string](Get-OptionalProperty $action 'title' '')
             $dismissContains = [string](Get-OptionalProperty $action 'containsElement' '')
@@ -544,7 +553,11 @@ function Test-ClientTestScenario {
         }
         if ($type -eq 'clickNearest') {
             Get-RequiredClientTestText $action 'anchorAutomationName' $number | Out-Null
-            Get-RequiredClientTestText $action 'automationName' $number | Out-Null
+            $targetName = [string](Get-OptionalProperty $action 'automationName' '')
+            $controlType = [string](Get-OptionalProperty $action 'controlType' '')
+            if ([string]::IsNullOrWhiteSpace($targetName) -and [string]::IsNullOrWhiteSpace($controlType)) {
+                throw "Action $number clickNearest requires 'automationName' or 'controlType'."
+            }
         }
         if ($type -in @('assertNearest','assertNoNearest')) {
             Get-RequiredClientTestText $action 'anchorAutomationName' $number | Out-Null
@@ -572,7 +585,7 @@ function Test-ClientTestScenario {
             $state = [string]$action.state
             if ($state -notin @('On','Off','Indeterminate')) { throw "Action $number has invalid state '$state'." }
         }
-        if ($action.PSObject.Properties['pattern']) {
+        if ($type -in @('clickNearest','assertNearest','assertNoNearest') -and $action.PSObject.Properties['pattern']) {
             $pattern = [string]$action.pattern
             if ($pattern -notin @('Invoke','Toggle','SelectionItem')) { throw "Action $number has invalid pattern '$pattern'." }
         }
@@ -626,6 +639,12 @@ try {
     } elseif ($ValidateScenarioOnly) {
         throw 'ValidateScenarioOnly requires ScenarioPath.'
     }
+    if ($StartAtAction -ne 1 -and -not $ScenarioPath) {
+        throw 'StartAtAction requires ScenarioPath.'
+    }
+    if ($ScenarioPath -and $StartAtAction -gt [Math]::Max(1, $actions.Count)) {
+        throw "StartAtAction $StartAtAction is past the scenario end ($($actions.Count) actions)."
+    }
 } catch {
     [Console]::Error.WriteLine("[ERROR] Scenario validation failed: $($_.Exception.Message)")
     exit 1
@@ -677,7 +696,10 @@ try {
     Write-Host "[READY] PID $($script:clientProcess.Id): $($mainWindow.Title)" -ForegroundColor Green
     Save-WindowScreenshot $mainWindow.Handle (Join-Path $OutputDir 'initial.png')
 
-    for ($index = 0; $index -lt $actions.Count; $index++) {
+    if ($StartAtAction -gt 1) {
+        Write-Host "[RESUME] Starting at action $StartAtAction of $($actions.Count)." -ForegroundColor Cyan
+    }
+    for ($index = $StartAtAction - 1; $index -lt $actions.Count; $index++) {
         $action = $actions[$index]
         $type = [string](Get-OptionalProperty $action 'type' '')
         $label = [string](Get-OptionalProperty $action 'name' ("{0:D2}-{1}" -f ($index + 1), $type))
@@ -740,16 +762,20 @@ try {
                     $anchorName = [string](Get-OptionalProperty $action 'anchorAutomationName' '')
                     $targetName = [string](Get-OptionalProperty $action 'automationName' '')
                     $windowTitle = [string](Get-OptionalProperty $action 'windowTitle' '')
+                    $controlType = [string](Get-OptionalProperty $action 'controlType' '')
                     $requiredPattern = [string](Get-OptionalProperty $action 'pattern' '')
+                    $relation = [string](Get-OptionalProperty $action 'relation' '')
+                    $maxDistance = [double](Get-OptionalProperty $action 'maxDistance' 0)
                     $nearestProbe = {
-                        Find-NearestUiEntry $script:clientProcess.Id $anchorName $targetName $windowTitle '' $requiredPattern
+                        Find-NearestUiEntry $script:clientProcess.Id $anchorName $targetName $windowTitle $controlType $requiredPattern $relation $maxDistance
                     }
                     $nearestTarget = Wait-ClientTestValue $nearestProbe $timeoutSeconds
                     if (-not $nearestTarget) {
                         $anchor = Find-UiEntry $script:clientProcess.Id $anchorName $windowTitle
                         if (-not $anchor -and [bool](Get-OptionalProperty $action 'optional' $false)) { break }
                         if (-not $anchor) { throw "Anchor UI element not found: '$anchorName'." }
-                        throw "No visible '$targetName' element was found near '$anchorName'."
+                        $targetDescription = if ($targetName) { "'$targetName'" } else { "control type '$controlType'" }
+                        throw "No visible $targetDescription element was found near '$anchorName'."
                     }
                     Invoke-UiAction $nearestTarget.Entry $nearestTarget.Window.Handle 'Click'
                 }
@@ -774,6 +800,38 @@ try {
                     if (-not (Wait-ClientTestValue $anchorProbe $timeoutSeconds)) { throw "Anchor UI element not found: '$anchorName'." }
                     if (-not (Wait-ClientTestCondition { $null -eq (& $nearestProbe) } $timeoutSeconds)) {
                         throw "Unexpected nearby UI element was found near '$anchorName'."
+                    }
+                }
+                { $_ -in @('assertUiText','assertNoUiText') } {
+                    $textPattern = [string](Get-OptionalProperty $action 'pattern' '')
+                    $windowTitle = [string](Get-OptionalProperty $action 'windowTitle' '')
+                    $visibleOnly = [bool](Get-OptionalProperty $action 'visible' $true)
+                    $textProbe = {
+                        foreach ($window in (Get-ClientWindows $script:clientProcess.Id)) {
+                            if ($windowTitle -and $window.Title -notmatch $windowTitle) { continue }
+                            $match = Get-UiEntries $window.Handle | Where-Object {
+                                $_.Name -and $_.Name -match $textPattern -and (-not $visibleOnly -or -not $_.IsOffscreen)
+                            } | Select-Object -First 1
+                            if ($match) { return [pscustomobject]@{ Window=$window; Entry=$match } }
+                        }
+                        return $null
+                    }
+                    if ($type -eq 'assertUiText') {
+                        if (-not (Wait-ClientTestValue $textProbe $timeoutSeconds)) {
+                            throw "Expected UI text was not found: '$textPattern'."
+                        }
+                    } else {
+                        $unexpectedText = $null
+                        $observationDeadline = (Get-Date).AddSeconds([math]::Max(0, $timeoutSeconds))
+                        do {
+                            $unexpectedText = & $textProbe
+                            if ($unexpectedText -or (Get-Date) -ge $observationDeadline) { break }
+                            Start-Sleep -Milliseconds 250
+                        } while ($true)
+                        if ($unexpectedText) {
+                            $foundText = $unexpectedText.Entry.Name
+                            throw "Unexpected UI text found for '$textPattern': '$foundText'."
+                        }
                     }
                 }
                 { $_ -in @('assertElement','assertNoElement','assertToggle','toggle','invoke','select','clickElement') } {
@@ -933,6 +991,17 @@ try {
             }
         } catch {}
     }
+    $clientIsRunning = $false
+    if ($script:clientProcess) {
+        try {
+            $script:clientProcess.Refresh()
+            $clientIsRunning = -not $script:clientProcess.HasExited
+        } catch {}
+    }
+    $retainStartedClient = $startedByHarness -and $clientIsRunning -and (
+        $KeepClient -or ($failures.Count -gt 0 -and -not $CloseClientOnFailure)
+    )
+    $clientWillRemainRunning = $clientIsRunning -and (-not $startedByHarness -or $retainStartedClient)
     $result = [pscustomobject]@{
         Status = if ($failures.Count -eq 0) { 'passed' } else { 'failed' }
         StartedAt = $startedAt.ToString('o')
@@ -942,6 +1011,8 @@ try {
         FinalStage = $currentStage
         ProcessId = if ($script:clientProcess) { $script:clientProcess.Id } else { $null }
         StartedByHarness = $startedByHarness
+        StartAtAction = $StartAtAction
+        ClientRetained = [bool]$clientWillRemainRunning
         Client = $Client
         URLProvided = [bool]$URL
         Diagnostics = [pscustomobject]@{
@@ -953,7 +1024,10 @@ try {
         Failures = @($failures)
     }
     Write-JsonFile $result (Join-Path $OutputDir 'result.json') 10
-    if ($startedByHarness -and -not $KeepClient -and $script:clientProcess -and -not $script:clientProcess.HasExited) {
+    if ($retainStartedClient -and $failures.Count -gt 0) {
+        Write-Host "[REUSE] Client PID $($script:clientProcess.Id) was kept after failure; retry with -AttachProcessId $($script:clientProcess.Id)." -ForegroundColor Cyan
+    }
+    if ($startedByHarness -and -not $retainStartedClient -and $clientIsRunning) {
         Stop-Process -Id $script:clientProcess.Id -Force -ErrorAction SilentlyContinue
     }
 }

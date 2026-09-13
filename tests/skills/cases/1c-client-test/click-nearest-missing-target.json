@@ -1,0 +1,12 @@
+{
+  "name": "clickNearest требует имя или тип целевого элемента",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": [
+      { "type": "clickNearest", "anchorAutomationName": "Флажок" }
+    ]
+  },
+  "expectError": "clickNearest requires 'automationName' or 'controlType'",
+  "noSnapshot": "негативная офлайн-проверка"
+}

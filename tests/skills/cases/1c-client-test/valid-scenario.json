@@ -6,13 +6,15 @@
     "actions": [
       { "type": "wait", "milliseconds": 10 },
       { "type": "assertWindow", "title": "1С:Предприятие", "containsElement": "Продажи|Sales", "timeoutSeconds": 5 },
+      { "type": "assertNoUiText", "pattern": "Не задано значение параметра|Ошибка", "timeoutSeconds": 2 },
       { "type": "clickNearest", "anchorAutomationName": "Раздел", "automationName": "Открыть", "pattern": "Invoke" },
+      { "type": "clickNearest", "anchorAutomationName": "По точному соответствию", "controlType": "Edit", "relation": "left", "maxDistance": 500 },
       { "type": "assertNearest", "anchorAutomationName": "Таблица", "controlType": "DataGrid", "relation": "below", "maxDistance": 500 },
       { "type": "screenshot", "file": "steps/final.png", "screenshotAfter": true }
     ]
   },
   "expect": {
-    "stdoutContains": "[OK] Scenario is valid (5 actions)."
+    "stdoutContains": "[OK] Scenario is valid (7 actions)."
   },
   "noSnapshot": "проверяется только офлайн-контракт сценария"
 }

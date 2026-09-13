@@ -8,11 +8,12 @@
 - `screenshot` — `file`.
 - `dumpUi` — сохранить дерево UI Automation.
 - `assertWindow` / `assertNoWindow` — регулярное выражение `title` и необязательное регулярное выражение `containsElement` для семантического текста внутри верхнеуровневого окна процесса.
+- `assertUiText` / `assertNoUiText` — наличие или отсутствие текста по регулярному выражению `pattern` в UI-дереве; по умолчанию учитываются только видимые элементы, `visible: false` включает и заэкранные. Для `assertNoUiText` поле `timeoutSeconds` — это окно наблюдения: шаг провалится, если текст появится в любой момент до тайм-аута. Используй его для встроенных сообщений 1С, которые не создают отдельного окна.
 - `dismissWindow` — конкретный `title` либо `containsElement` обязателен; общий `.*` без семантического текста запрещён. `buttonName` по умолчанию равен `Закрыть`. Если подходящего окна нет, действие ничего не делает; найденное окно сначала сохраняется отдельным снимком, затем закрывается с polling-проверкой исчезновения до `timeoutSeconds`.
 - `invoke` — найти UI Automation-элемент по `automationName` и вызвать `InvokePattern`.
 - `select` — выбрать вкладку или другой элемент через `SelectionItemPattern`, с fallback на нативный клик.
 - `clickElement` — кликнуть найденный по `automationName` элемент через доступный UI Automation-паттерн или нативную clickable point.
-- `clickNearest` — выбрать ближайший к `anchorAutomationName` видимый элемент с именем `automationName`; поле `pattern` может ограничить кандидатов (`Invoke`, `Toggle`, `SelectionItem`). `optional: true` разрешает отсутствие стартовой панели при повторном attach-прогоне. Удобно для одноимённых кнопок вкладок 1С.
+- `clickNearest` — выбрать ближайший к `anchorAutomationName` видимый элемент. Цель задаётся через `automationName` или, если 1С не публикует имя, через `controlType`; можно добавить `relation` (`below`, `above`, `left`, `right`), `maxDistance` и `pattern` (`Invoke`, `Toggle`, `SelectionItem`). `optional: true` разрешает отсутствие стартовой панели при повторном attach-прогоне.
 - `assertNearest` / `assertNoNearest` — проверить наличие или отсутствие видимого элемента рядом с `anchorAutomationName`. Кандидат ограничивается необязательными `automationName`, `controlType`, `pattern`, пространственным отношением `relation` (`below`, `above`, `left`, `right`) и расстоянием `maxDistance` в экранных пикселях; подходит для безымянных таблиц 1С.
 - `toggle` — найти элемент по `automationName`, вызвать `TogglePattern`; необязательное ожидаемое `state`: `On`, `Off` или `Indeterminate`.
 - `assertToggle` — проверить состояние `TogglePattern` без изменения элемента.
@@ -28,12 +29,19 @@
 {
   "actions": [
     {"type":"assertNoWindow", "title":"непредвиденная ситуация", "screenshotAfter":true},
+    {"type":"assertNoUiText", "pattern":"Не задано значение параметра|Ошибка", "timeoutSeconds":2},
     {"type":"toggle", "automationName":"Показывать остатки", "state":"On"},
     {"type":"assertElement", "automationName":"Остатки по текущей позиции"},
     {"type":"toggle", "automationName":"Показывать остатки", "state":"Off"},
     {"type":"screenshot", "file":"final.png"}
   ]
 }
+```
+
+Клик по безымянному полю ввода слева от именованного флажка:
+
+```json
+{"type":"clickNearest","anchorAutomationName":"По точному соответствию","controlType":"Edit","relation":"left","maxDistance":500,"timeoutSeconds":30}
 ```
 
 Если клиент 1С не публикует нужный элемент в UI Automation, сценарий должен завершиться ошибкой, а не автоматически переходить к произвольной экранной координате. Добавляй `clickRelative` отдельным явным действием и подтверждай результат следующей проверкой или снимком.

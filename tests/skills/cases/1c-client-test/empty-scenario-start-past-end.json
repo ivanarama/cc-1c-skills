@@ -1,0 +1,11 @@
+{
+  "name": "Пустой сценарий не допускает продолжение не с первого шага",
+  "osOnly": "win32",
+  "runtimeOnly": "powershell",
+  "input": {
+    "actions": []
+  },
+  "args_extra": ["-StartAtAction", "2"],
+  "expectError": "StartAtAction 2 is past the scenario end (0 actions).",
+  "noSnapshot": "проверяется защита от ложного успеха при продолжении пустого сценария"
+}
