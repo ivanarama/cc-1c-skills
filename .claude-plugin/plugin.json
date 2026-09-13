@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "1c-skills-py",
+  "description": "[Python] Навыки разработки 1С 8.3: XML и CLI конфигуратора, тестирование веб-клиента. 1c-client-test для толстого/тонкого клиента — только Windows с PowerShell; остальные навыки — Linux/Mac/Windows.",
+  "author": {
+    "name": "Nikolay Shirokov"
+  },
+  "homepage": "https://github.com/Nikolay-Shirokov/cc-1c-skills",
+  "repository": "https://github.com/Nikolay-Shirokov/cc-1c-skills",
+  "license": "MIT",
+  "keywords": [
+    "1c",
+    "1c-dev",
+    "cf",
+    "cfe",
+    "epf",
+    "erf",
+    "metadata",
+    "configuration",
+    "extension",
+    "form",
+    "report",
+    "skd",
+    "data-processor",
+    "mxl",
+    "web-client",
+    "desktop-client",
+    "thick-client",
+    "thin-client",
+    "testing",
+    "test-automation"
+  ],
+  "skills": "./.claude/skills/"
+}
