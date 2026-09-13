@@ -235,17 +235,22 @@ function Normalize-UiCaption {
 function Find-UiEntry {
     param([int]$ProcessId, [string]$Name, [string]$WindowTitle = '')
     $normalizedName = Normalize-UiCaption $Name
+    $candidates = @()
     foreach ($window in (Get-ClientWindows $ProcessId)) {
         if ($WindowTitle -and $window.Title -notmatch $WindowTitle) { continue }
-        $match = Get-UiEntries $window.Handle | Where-Object {
+        $matches = Get-UiEntries $window.Handle | Where-Object {
             $_.Name -and (
                 $_.Name.Equals($Name, [StringComparison]::OrdinalIgnoreCase) -or
                 (Normalize-UiCaption $_.Name).Equals($normalizedName, [StringComparison]::OrdinalIgnoreCase)
             )
-        } | Select-Object -First 1
-        if ($match) { return [pscustomobject]@{ Window = $window; Entry = $match } }
+        }
+        foreach ($match in $matches) {
+            $candidates += [pscustomobject]@{ Window = $window; Entry = $match }
+        }
     }
-    return $null
+    return $candidates | Sort-Object `
+        @{ Expression = { if ($_.Entry.IsEnabled) { 0 } else { 1 } } }, `
+        @{ Expression = { -$_.Entry.Patterns.Count } } | Select-Object -First 1
 }
 
 function Find-NearestUiEntry {
@@ -694,7 +699,7 @@ try {
                         $count = @(Find-MatchingWindows $script:clientProcess.Id $title $contains).Count
                         if ($type -eq 'assertWindow') { return $count -gt 0 }
                         return $count -eq 0
-                    }.GetNewClosure()
+                    }
                     if (-not (Wait-ClientTestCondition $windowCondition $timeoutSeconds)) {
                         if ($type -eq 'assertWindow') { throw "Expected window not found: title='$title', contains='$contains'." }
                         throw "Unexpected window found: title='$title', contains='$contains'."
@@ -738,7 +743,7 @@ try {
                     $requiredPattern = [string](Get-OptionalProperty $action 'pattern' '')
                     $nearestProbe = {
                         Find-NearestUiEntry $script:clientProcess.Id $anchorName $targetName $windowTitle '' $requiredPattern
-                    }.GetNewClosure()
+                    }
                     $nearestTarget = Wait-ClientTestValue $nearestProbe $timeoutSeconds
                     if (-not $nearestTarget) {
                         $anchor = Find-UiEntry $script:clientProcess.Id $anchorName $windowTitle
@@ -758,14 +763,14 @@ try {
                     $maxDistance = [double](Get-OptionalProperty $action 'maxDistance' 0)
                     $nearestProbe = {
                         Find-NearestUiEntry $script:clientProcess.Id $anchorName $targetName $windowTitle $controlType $requiredPattern $relation $maxDistance
-                    }.GetNewClosure()
+                    }
                     if ($type -eq 'assertNearest') {
                         $nearestTarget = Wait-ClientTestValue $nearestProbe $timeoutSeconds
                         if ($nearestTarget) { break }
                         if (-not (Find-UiEntry $script:clientProcess.Id $anchorName $windowTitle)) { throw "Anchor UI element not found: '$anchorName'." }
                         throw "Expected nearby UI element was not found near '$anchorName'."
                     }
-                    $anchorProbe = { Find-UiEntry $script:clientProcess.Id $anchorName $windowTitle }.GetNewClosure()
+                    $anchorProbe = { Find-UiEntry $script:clientProcess.Id $anchorName $windowTitle }
                     if (-not (Wait-ClientTestValue $anchorProbe $timeoutSeconds)) { throw "Anchor UI element not found: '$anchorName'." }
                     if (-not (Wait-ClientTestCondition { $null -eq (& $nearestProbe) } $timeoutSeconds)) {
                         throw "Unexpected nearby UI element was found near '$anchorName'."
@@ -774,7 +779,7 @@ try {
                 { $_ -in @('assertElement','assertNoElement','assertToggle','toggle','invoke','select','clickElement') } {
                     $automationName = [string](Get-OptionalProperty $action 'automationName' '')
                     $windowTitle = [string](Get-OptionalProperty $action 'windowTitle' '')
-                    $targetProbe = { Find-UiEntry $script:clientProcess.Id $automationName $windowTitle }.GetNewClosure()
+                    $targetProbe = { Find-UiEntry $script:clientProcess.Id $automationName $windowTitle }
                     if ($type -eq 'assertNoElement') {
                         if (-not (Wait-ClientTestCondition { $null -eq (& $targetProbe) } $timeoutSeconds)) {
                             throw "Unexpected UI element found: '$automationName'."
@@ -790,7 +795,7 @@ try {
                             $visibleProbe = {
                                 $currentTarget = Find-UiEntry $script:clientProcess.Id $automationName $windowTitle
                                 return $null -ne $currentTarget -and -not $currentTarget.Entry.IsOffscreen
-                            }.GetNewClosure()
+                            }
                             if (-not (Wait-ClientTestCondition $visibleProbe $timeoutSeconds)) { throw "UI element '$automationName' is offscreen." }
                         }
                     } elseif ($type -eq 'assertToggle') {
@@ -805,7 +810,7 @@ try {
                                 $currentPattern = $null
                                 if (-not $currentTarget.Entry.Element.TryGetCurrentPattern([Windows.Automation.TogglePattern]::Pattern, [ref]$currentPattern)) { return $false }
                                 return $currentPattern.Current.ToggleState.ToString() -eq $desired
-                            }.GetNewClosure()
+                            }
                             if (-not (Wait-ClientTestCondition $stateProbe $timeoutSeconds)) {
                                 $actual = $pattern.Current.ToggleState.ToString()
                                 throw "Toggle '$automationName' is '$actual', expected '$desired'."
@@ -822,7 +827,7 @@ try {
                     $windowProbe = {
                         if ($title) { return Find-MatchingWindows $script:clientProcess.Id $title '' | Select-Object -First 1 }
                         return Get-MainWindowInfo $script:clientProcess.Id
-                    }.GetNewClosure()
+                    }
                     $window = Wait-ClientTestValue $windowProbe $timeoutSeconds
                     if (-not $window) { throw "Window not found for relative click: '$title'." }
                     $x = [double](Get-OptionalProperty $action 'x' 0)
