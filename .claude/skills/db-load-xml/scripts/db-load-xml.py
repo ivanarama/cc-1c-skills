@@ -9,10 +9,13 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -636,6 +639,216 @@ def _redact(text, *secrets):
     return text
 
 
+# --- File-infobase process preflight ---
+# A substring check is unsafe (D:\Bases\Dev also matches D:\Bases\Dev-Copy). Extract the
+# value of /F or --db-path, normalize both paths, and compare the full value. Never print a
+# process command line because it can contain credentials.
+PLATFORM_PROCESS_NAMES = {
+    "1cv8", "1cv8.exe", "1cv8c", "1cv8c.exe", "1cv8a", "1cv8a.exe",
+    "1cv8s", "1cv8s.exe", "ibcmd", "ibcmd.exe",
+}
+
+
+def normalize_infobase_path(path):
+    if not path or not str(path).strip():
+        return ""
+    value = str(path).strip().strip('"')
+    try:
+        return os.path.normcase(os.path.normpath(os.path.realpath(os.path.abspath(value))))
+    except (OSError, ValueError):
+        return ""
+
+
+def split_process_command_line(command_line):
+    if isinstance(command_line, (list, tuple)):
+        return [str(x) for x in command_line]
+    if not command_line:
+        return []
+    if os.name != "nt":
+        try:
+            return shlex.split(str(command_line), posix=True)
+        except ValueError:
+            return []
+
+    # CommandLineToArgvW follows the same quoting rules used to create Win32 processes.
+    import ctypes
+    from ctypes import wintypes
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.CommandLineToArgvW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    argc = ctypes.c_int()
+    argv = shell32.CommandLineToArgvW(str(command_line), ctypes.byref(argc))
+    if not argv:
+        return []
+    try:
+        return [argv[i] for i in range(argc.value)]
+    finally:
+        kernel32.LocalFree(argv)
+
+
+def infobase_path_from_arguments(arguments):
+    for index, token in enumerate(arguments):
+        token = str(token)
+        lower = token.lower()
+        if lower == "/f":
+            return str(arguments[index + 1]) if index + 1 < len(arguments) else ""
+        if lower.startswith("/f") and len(token) > 2:
+            candidate = token[2:]
+            # Do not mistake /Format and similar switches for the glued /F<path> form.
+            if os.path.isabs(candidate) or re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", candidate):
+                return candidate
+        if lower == "--db-path":
+            return str(arguments[index + 1]) if index + 1 < len(arguments) else ""
+        if lower.startswith("--db-path="):
+            return token[len("--db-path="):]
+    return ""
+
+
+def platform_process_mode(name, arguments):
+    upper = {str(x).upper() for x in arguments}
+    if "ENTERPRISE" in upper:
+        return "ENTERPRISE"
+    if "DESIGNER" in upper:
+        return "DESIGNER"
+    if str(name).lower().startswith("ibcmd"):
+        return "IBCMD"
+    return "UNKNOWN"
+
+
+def process_records(snapshot_file=""):
+    if snapshot_file:
+        if not os.path.isfile(snapshot_file):
+            print(f"Error: preflight process snapshot not found: {snapshot_file}")
+            sys.exit(1)
+        try:
+            with open(snapshot_file, encoding="utf-8-sig") as stream:
+                data = json.load(stream)
+        except (OSError, ValueError) as exc:
+            print(f"Error: cannot read preflight process snapshot: {exc}")
+            sys.exit(1)
+        return data if isinstance(data, list) else [data]
+
+    try:
+        import psutil
+    except ImportError:
+        print("[warning] process preflight unavailable: install psutil")
+        return []
+
+    records = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            info = proc.info
+            if (info.get("name") or "").lower() not in PLATFORM_PROCESS_NAMES:
+                continue
+            records.append({
+                "Name": info.get("name") or "",
+                "ProcessId": info.get("pid"),
+                "CommandLine": info.get("cmdline") or [],
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+    return records
+
+
+def infobase_platform_processes(path, snapshot_file=""):
+    target = normalize_infobase_path(path)
+    if not target:
+        return []
+    matches = []
+    for item in process_records(snapshot_file):
+        name = str(item.get("Name") or item.get("name") or "")
+        if name.lower() not in PLATFORM_PROCESS_NAMES:
+            continue
+        command_line = item.get("CommandLine", item.get("cmdline", []))
+        tokens = split_process_command_line(command_line)
+        candidate = normalize_infobase_path(infobase_path_from_arguments(tokens))
+        if not candidate or candidate != target:
+            continue
+        try:
+            pid = int(item.get("ProcessId", item.get("pid")))
+        except (TypeError, ValueError):
+            continue
+        matches.append({"name": name, "pid": pid, "mode": platform_process_mode(name, tokens)})
+    return matches
+
+
+def request_graceful_close(pid):
+    if os.name == "nt":
+        # CloseMainWindow posts WM_CLOSE and permits the client to show/save through its normal
+        # shutdown path. We deliberately do not fall back to TerminateProcess.
+        script = (
+            "$p=Get-Process -Id $args[0] -ErrorAction SilentlyContinue; "
+            "if(-not $p){exit 0}; if($p.CloseMainWindow()){exit 0}else{exit 4}"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, str(pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def run_process_preflight(args):
+    if args.AllowRunningClients and args.StopRunningClients:
+        print("Error: -AllowRunningClients and -StopRunningClients are mutually exclusive")
+        sys.exit(1)
+    if not args.InfoBasePath:
+        if args.AllowRunningClients or args.StopRunningClients:
+            print("Error: process preflight options apply to file infobases only (-InfoBasePath)")
+            sys.exit(1)
+        return
+
+    matches = infobase_platform_processes(args.InfoBasePath, args.PreflightProcessFile)
+    if not matches:
+        return
+    print("[preflight] Processes using this file infobase:")
+    for item in matches:
+        print(f"  PID {item['pid']} | {item['name']} | {item['mode']}")
+
+    if args.AllowRunningClients:
+        print("[warning] continuing because -AllowRunningClients was specified")
+        return
+    if not args.StopRunningClients:
+        print("Error: refusing to load while this file infobase is in use.")
+        print("       Close the listed processes, use -StopRunningClients for ordinary clients,")
+        print("       or explicitly keep them with -AllowRunningClients.")
+        sys.exit(4)
+
+    if any(item["mode"] != "ENTERPRISE" for item in matches):
+        print("Error: automatic stop is limited to ENTERPRISE clients; Designer, ibcmd and unknown processes are never stopped.")
+        sys.exit(4)
+    if args.PreflightProcessFile:
+        print("Error: -StopRunningClients cannot be used with the fixture process snapshot.")
+        sys.exit(1)
+
+    # Recheck exact ownership immediately before signaling to reduce the PID-reuse window.
+    wanted = {item["pid"] for item in matches}
+    current = [item for item in infobase_platform_processes(args.InfoBasePath)
+               if item["pid"] in wanted and item["mode"] == "ENTERPRISE"]
+    for item in current:
+        print(f"[preflight] Requesting graceful close of PID {item['pid']}...")
+        if not request_graceful_close(item["pid"]):
+            print(f"Error: PID {item['pid']} has no closeable main window; it was not terminated.")
+            sys.exit(4)
+
+    deadline = time.monotonic() + args.ClientStopTimeoutSeconds
+    while time.monotonic() < deadline:
+        remaining = infobase_platform_processes(args.InfoBasePath)
+        if not remaining:
+            print("[preflight] Clients closed.")
+            return
+        time.sleep(0.25)
+    print(f"Error: clients did not close within {args.ClientStopTimeoutSeconds} seconds; no process was force-terminated.")
+    sys.exit(4)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -681,6 +894,14 @@ def main():
                         help="Extra 1cv8 arguments, e.g. /UseHwLicenses+")
     parser.add_argument("-AdditionalIbcmdArguments", nargs="*", default=[],
                         help="Extra ibcmd arguments in --key=value form")
+    parser.add_argument("-AllowRunningClients", action="store_true",
+                        help="Explicitly continue when this file infobase has running 1C processes")
+    parser.add_argument("-StopRunningClients", action="store_true",
+                        help="Gracefully close ENTERPRISE clients for this file infobase before loading")
+    parser.add_argument("-ClientStopTimeoutSeconds", type=int, default=30,
+                        help="Seconds to wait for graceful client shutdown (1..300)")
+    # Fixture-only process snapshot; intentionally omitted from SKILL.md.
+    parser.add_argument("-PreflightProcessFile", default="", help=argparse.SUPPRESS)
     known_opts = {s.lower() for a in parser._actions for s in a.option_strings}
     argv, v8_extra, ibcmd_extra = extract_extra_args(sys.argv[1:], known_opts)
     args = ci_parse_args(parser, argv)
@@ -690,6 +911,10 @@ def main():
     assert_infobase_exists(args.InfoBasePath)
     args.ConfigDir = clean_path(args.ConfigDir, "-ConfigDir")
     args.ListFile = clean_path(args.ListFile, "-ListFile")
+    args.PreflightProcessFile = clean_path(args.PreflightProcessFile, "-PreflightProcessFile")
+    if not 1 <= args.ClientStopTimeoutSeconds <= 300:
+        print("Error: -ClientStopTimeoutSeconds must be in range 1..300")
+        sys.exit(1)
 
     # --- Resolve V8Path ---
     v8path = resolve_v8path(args.V8Path)
@@ -734,6 +959,9 @@ def main():
     if args.Mode == "Partial" and not args.Files and not args.ListFile:
         print("Error: -Files or -ListFile required for Partial mode")
         sys.exit(1)
+
+    # Refuse to mutate a file infobase until already-running processes are handled explicitly.
+    run_process_preflight(args)
 
     # --- ibcmd branch (file infobase only; hierarchical full-directory import) ---
     if engine == "ibcmd":

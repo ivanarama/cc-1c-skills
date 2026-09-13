@@ -1,0 +1,40 @@
+{
+  "name": "Preflight: продолжение при открытом клиенте требует явного ключа",
+  "cwd": "workDir",
+  "fakePlatform": { "log": "" },
+  "preRun": [
+    {
+      "writeFile": {
+        "path": "src/Configuration.xml",
+        "content": "<?xml version=\"1.0\"?><MetaDataObject/>"
+      }
+    },
+    {
+      "writeFile": {
+        "path": "processes.json",
+        "content": [
+          {
+            "Name": "1cv8.exe",
+            "ProcessId": 4444,
+            "CommandLine": "1cv8.exe ENTERPRISE /F \"ib\""
+          }
+        ]
+      }
+    }
+  ],
+  "args_extra": [
+    "-V8Path", "{fakePlatform}",
+    "-InfoBasePath", "ib",
+    "-ConfigDir", "src",
+    "-PreflightProcessFile", "processes.json",
+    "-AllowRunningClients"
+  ],
+  "expect": {
+    "stdoutContains": [
+      "PID 4444 | 1cv8.exe | ENTERPRISE",
+      "[warning] continuing because -AllowRunningClients was specified",
+      "Load completed successfully"
+    ]
+  },
+  "noSnapshot": "проверяется явное разрешение продолжить"
+}

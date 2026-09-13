@@ -1,0 +1,41 @@
+{
+  "name": "Preflight: явный stop не завершает Designer и ibcmd",
+  "cwd": "workDir",
+  "fakePlatform": { "log": "" },
+  "preRun": [
+    {
+      "writeFile": {
+        "path": "src/Configuration.xml",
+        "content": "<?xml version=\"1.0\"?><MetaDataObject/>"
+      }
+    },
+    {
+      "writeFile": {
+        "path": "processes.json",
+        "content": [
+          {
+            "Name": "1cv8.exe",
+            "ProcessId": 4545,
+            "CommandLine": "1cv8.exe DESIGNER /F \"ib\""
+          }
+        ]
+      }
+    }
+  ],
+  "args_extra": [
+    "-V8Path", "{fakePlatform}",
+    "-InfoBasePath", "ib",
+    "-ConfigDir", "src",
+    "-PreflightProcessFile", "processes.json",
+    "-StopRunningClients"
+  ],
+  "expect": {
+    "stdoutContains": [
+      "PID 4545 | 1cv8.exe | DESIGNER",
+      "automatic stop is limited to ENTERPRISE clients"
+    ],
+    "stdoutNotContains": "Running:"
+  },
+  "expectError": true,
+  "noSnapshot": "Designer никогда не завершается автоматически"
+}

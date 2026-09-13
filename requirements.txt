@@ -2,5 +2,5 @@
 # Установка: pip install -r requirements.txt
 lxml>=4.9.0      # DOM-навыки (edit/validate/info/compile)
 Pillow>=10.0.0   # /img-grid (чтение изображений, наложение сетки)
-psutil>=5.9.0    # web-навыки (управление Apache)
+psutil>=5.9.0    # web-навыки (Apache), db-load-xml (preflight процессов файловой базы)
 pywin32>=306; platform_system == "Windows"  # /db-query (COMConnector)

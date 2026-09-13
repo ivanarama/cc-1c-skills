@@ -1,0 +1,41 @@
+{
+  "name": "Preflight: точный путь файловой базы блокирует загрузку до запуска платформы",
+  "cwd": "workDir",
+  "fakePlatform": { "log": "" },
+  "preRun": [
+    {
+      "writeFile": {
+        "path": "src/Configuration.xml",
+        "content": "<?xml version=\"1.0\"?><MetaDataObject/>"
+      }
+    },
+    {
+      "writeFile": {
+        "path": "processes.json",
+        "content": [
+          {
+            "Name": "1cv8.exe",
+            "ProcessId": 4242,
+            "CommandLine": "\"C:\\Program Files\\1cv8\\1cv8.exe\" ENTERPRISE /F \"ib\" /N\"user\" /P\"secret\""
+          }
+        ]
+      }
+    }
+  ],
+  "args_extra": [
+    "-V8Path", "{fakePlatform}",
+    "-InfoBasePath", "ib",
+    "-ConfigDir", "src",
+    "-PreflightProcessFile", "processes.json"
+  ],
+  "expect": {
+    "stdoutContains": [
+      "[preflight] Processes using this file infobase:",
+      "PID 4242 | 1cv8.exe | ENTERPRISE",
+      "Error: refusing to load while this file infobase is in use."
+    ],
+    "stdoutNotContains": ["Running:", "secret"]
+  },
+  "expectError": true,
+  "noSnapshot": "проверяется отказ до платформы и отсутствие утечки командной строки процесса"
+}

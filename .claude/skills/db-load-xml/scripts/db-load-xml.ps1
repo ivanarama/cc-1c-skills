@@ -54,6 +54,15 @@
 .PARAMETER AdditionalIbcmdArguments
     Дополнительные аргументы запуска ibcmd (форма --ключ=значение)
 
+.PARAMETER AllowRunningClients
+    Явно продолжить загрузку, если найдены процессы 1С именно этой файловой базы
+
+.PARAMETER StopRunningClients
+    Перед загрузкой запросить штатное закрытие обычных клиентов именно этой файловой базы
+
+.PARAMETER ClientStopTimeoutSeconds
+    Сколько секунд ждать штатного закрытия клиентов (по умолчанию 30)
+
 .EXAMPLE
     .\db-load-xml.ps1 -InfoBasePath "C:\Bases\MyDB" -ConfigDir "C:\src" -Mode Full
 
@@ -129,7 +138,21 @@ param(
     [string[]]$AdditionalV8Arguments = @(),
 
     [Parameter(Mandatory=$false)]
-    [string[]]$AdditionalIbcmdArguments = @()
+    [string[]]$AdditionalIbcmdArguments = @(),
+
+    [Parameter(Mandatory=$false)]
+    [switch]$AllowRunningClients,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$StopRunningClients,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateRange(1, 300)]
+    [int]$ClientStopTimeoutSeconds = 30,
+
+    # Только для fixture-тестов: JSON-снимок Win32_Process вместо системного списка.
+    [Parameter(Mandatory=$false)]
+    [string]$PreflightProcessFile
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -432,6 +455,7 @@ $V8Path = ConvertTo-CleanPath $V8Path '-V8Path'
 $InfoBasePath = ConvertTo-CleanPath $InfoBasePath '-InfoBasePath'
 $ConfigDir = ConvertTo-CleanPath $ConfigDir '-ConfigDir'
 $ListFile = ConvertTo-CleanPath $ListFile '-ListFile'
+$PreflightProcessFile = ConvertTo-CleanPath $PreflightProcessFile '-PreflightProcessFile'
 
 function Assert-InfoBaseExists {
     # These skills work on a ready infobase. Saying so up front beats the platform's
@@ -445,6 +469,213 @@ function Assert-InfoBaseExists {
 }
 
 Assert-InfoBaseExists $InfoBasePath
+
+# --- Preflight процессов файловой базы ---
+# Сравнение по подстроке опасно: D:\Bases\Dev совпадает с D:\Bases\Dev-Copy. Из командной
+# строки извлекается именно значение /F или --db-path, затем оба пути нормализуются и
+# сравниваются целиком. Командную строку не печатаем: в ней может быть пароль.
+function ConvertTo-NormalizedInfoBasePath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path.Trim().Trim('"'))
+        if (Test-Path -LiteralPath $full) {
+            $full = (Resolve-Path -LiteralPath $full -ErrorAction Stop).ProviderPath
+        }
+        $root = [System.IO.Path]::GetPathRoot($full)
+        if (-not $root -or -not $full.Equals($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $full = $full.TrimEnd('\', '/')
+        }
+        return $full
+    } catch {
+        return $null
+    }
+}
+
+function ConvertFrom-NativeCommandLine {
+    param([string]$CommandLine)
+    if (-not $CommandLine) { return @() }
+    if (-not ('Cc1cSkills.NativeCommandLine' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Cc1cSkills {
+    public static class NativeCommandLine {
+        [DllImport("shell32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr CommandLineToArgvW(string commandLine, out int argc);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr value);
+
+        public static string[] Split(string commandLine) {
+            int argc;
+            IntPtr argv = CommandLineToArgvW(commandLine, out argc);
+            if (argv == IntPtr.Zero) return new string[0];
+            try {
+                string[] result = new string[argc];
+                for (int i = 0; i < argc; i++) {
+                    IntPtr item = Marshal.ReadIntPtr(argv, i * IntPtr.Size);
+                    result[i] = Marshal.PtrToStringUni(item);
+                }
+                return result;
+            } finally {
+                LocalFree(argv);
+            }
+        }
+    }
+}
+'@
+    }
+    return @([Cc1cSkills.NativeCommandLine]::Split($CommandLine))
+}
+
+function Get-InfoBasePathFromArguments {
+    param([string[]]$Arguments)
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        $token = [string]$Arguments[$i]
+        if ($token.Equals('/F', [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($i + 1 -lt $Arguments.Count) { return [string]$Arguments[$i + 1] }
+            continue
+        }
+        if ($token.Length -gt 2 -and $token.Substring(0, 2).Equals('/F', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $candidate = $token.Substring(2)
+            # Не принять /Format и другие ключи за склеенную форму /F<путь>.
+            if ([System.IO.Path]::IsPathRooted($candidate)) { return $candidate }
+        }
+        if ($token.Equals('--db-path', [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($i + 1 -lt $Arguments.Count) { return [string]$Arguments[$i + 1] }
+            continue
+        }
+        if ($token.StartsWith('--db-path=', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $token.Substring('--db-path='.Length)
+        }
+    }
+    return $null
+}
+
+function Get-PlatformProcessMode {
+    param([string]$Name, [string[]]$Arguments)
+    foreach ($token in $Arguments) {
+        if ($token.Equals('ENTERPRISE', [System.StringComparison]::OrdinalIgnoreCase)) { return 'ENTERPRISE' }
+        if ($token.Equals('DESIGNER', [System.StringComparison]::OrdinalIgnoreCase)) { return 'DESIGNER' }
+    }
+    if ($Name -and $Name.StartsWith('ibcmd', [System.StringComparison]::OrdinalIgnoreCase)) { return 'IBCMD' }
+    return 'UNKNOWN'
+}
+
+function Get-InfoBasePlatformProcesses {
+    param([string]$Path, [string]$SnapshotFile)
+    $target = ConvertTo-NormalizedInfoBasePath $Path
+    if (-not $target) { return @() }
+
+    if ($SnapshotFile) {
+        if (-not (Test-Path -LiteralPath $SnapshotFile -PathType Leaf)) {
+            Write-Host "Error: preflight process snapshot not found: $SnapshotFile" -ForegroundColor Red
+            exit 1
+        }
+        try {
+            $processes = @(Get-Content -LiteralPath $SnapshotFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+        } catch {
+            Write-Host "Error: cannot read preflight process snapshot: $($_.Exception.Message)" -ForegroundColor Red
+            exit 1
+        }
+    } else {
+        try {
+            $knownNames = @('1cv8.exe', '1cv8c.exe', '1cv8a.exe', '1cv8s.exe', 'ibcmd.exe')
+            $nameFilter = ($knownNames | ForEach-Object { "Name='$_'" }) -join ' OR '
+            $processes = @(Get-CimInstance Win32_Process -Filter $nameFilter -ErrorAction Stop |
+                Where-Object { $knownNames -contains $_.Name })
+        } catch {
+            Write-Host "[warning] process preflight unavailable: $($_.Exception.Message)" -ForegroundColor Yellow
+            return @()
+        }
+    }
+
+    $result = @()
+    foreach ($item in $processes) {
+        $name = [string]$item.Name
+        if (-not $name -or -not $item.CommandLine) { continue }
+        try { $tokens = @(ConvertFrom-NativeCommandLine ([string]$item.CommandLine)) } catch { continue }
+        $candidate = ConvertTo-NormalizedInfoBasePath (Get-InfoBasePathFromArguments $tokens)
+        if (-not $candidate -or -not $candidate.Equals($target, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        $result += [pscustomobject]@{
+            Name      = $name
+            ProcessId = [int]$item.ProcessId
+            Mode      = Get-PlatformProcessMode $name $tokens
+        }
+    }
+    return $result
+}
+
+function Invoke-InfoBaseProcessPreflight {
+    param([string]$Path, [string]$SnapshotFile)
+    if ($AllowRunningClients -and $StopRunningClients) {
+        Write-Host "Error: -AllowRunningClients and -StopRunningClients are mutually exclusive" -ForegroundColor Red
+        exit 1
+    }
+    if (-not $Path) {
+        if ($AllowRunningClients -or $StopRunningClients) {
+            Write-Host "Error: process preflight options apply to file infobases only (-InfoBasePath)" -ForegroundColor Red
+            exit 1
+        }
+        return
+    }
+
+    $matches = @(Get-InfoBasePlatformProcesses $Path $SnapshotFile)
+    if ($matches.Count -eq 0) { return }
+
+    Write-Host "[preflight] Processes using this file infobase:" -ForegroundColor Yellow
+    foreach ($item in $matches) {
+        Write-Host "  PID $($item.ProcessId) | $($item.Name) | $($item.Mode)" -ForegroundColor Yellow
+    }
+
+    if ($AllowRunningClients) {
+        Write-Host "[warning] continuing because -AllowRunningClients was specified" -ForegroundColor Yellow
+        return
+    }
+    if (-not $StopRunningClients) {
+        Write-Host "Error: refusing to load while this file infobase is in use." -ForegroundColor Red
+        Write-Host "       Close the listed processes, use -StopRunningClients for ordinary clients," -ForegroundColor Red
+        Write-Host "       or explicitly keep them with -AllowRunningClients." -ForegroundColor Red
+        exit 4
+    }
+
+    $nonClients = @($matches | Where-Object { $_.Mode -ne 'ENTERPRISE' })
+    if ($nonClients.Count -gt 0) {
+        Write-Host "Error: automatic stop is limited to ENTERPRISE clients; Designer, ibcmd and unknown processes are never stopped." -ForegroundColor Red
+        exit 4
+    }
+    if ($SnapshotFile) {
+        Write-Host "Error: -StopRunningClients cannot be used with the fixture process snapshot." -ForegroundColor Red
+        exit 1
+    }
+
+    # Повторная точная проверка непосредственно перед WM_CLOSE защищает от устаревшего PID.
+    $current = @(Get-InfoBasePlatformProcesses $Path $null)
+    $wantedPids = @($matches | ForEach-Object { $_.ProcessId })
+    $current = @($current | Where-Object { $wantedPids -contains $_.ProcessId -and $_.Mode -eq 'ENTERPRISE' })
+    foreach ($item in $current) {
+        $proc = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        Write-Host "[preflight] Requesting graceful close of PID $($item.ProcessId)..." -ForegroundColor Yellow
+        if (-not $proc.CloseMainWindow()) {
+            Write-Host "Error: PID $($item.ProcessId) has no closeable main window; it was not terminated." -ForegroundColor Red
+            exit 4
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds($ClientStopTimeoutSeconds)
+    do {
+        $remaining = @(Get-InfoBasePlatformProcesses $Path $null)
+        if ($remaining.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    if ($remaining.Count -gt 0) {
+        Write-Host "Error: clients did not close within $ClientStopTimeoutSeconds seconds; no process was force-terminated." -ForegroundColor Red
+        exit 4
+    }
+    Write-Host "[preflight] Clients closed." -ForegroundColor Green
+}
 
 # --- Resolve V8Path ---
 function Find-ProjectV8Path {
@@ -700,6 +931,10 @@ if ($Mode -eq "Partial" -and -not $Files -and -not $ListFile) {
     Write-Host "Error: -Files or -ListFile required for Partial mode" -ForegroundColor Red
     exit 1
 }
+
+# Мутация файловой базы не начинается, пока не разрешена ситуация с уже открывшими её
+# процессами. Проверка выполняется после проверки аргументов, но до временных файлов и платформы.
+Invoke-InfoBaseProcessPreflight $InfoBasePath $PreflightProcessFile
 
 # --- Temp dir ---
 $tempDir = Join-Path $env:TEMP "db_load_xml_$(Get-Random)"

@@ -1,0 +1,36 @@
+{
+  "name": "Preflight: похожий путь с суффиксом не считается той же базой",
+  "cwd": "workDir",
+  "fakePlatform": { "log": "" },
+  "preRun": [
+    {
+      "writeFile": {
+        "path": "src/Configuration.xml",
+        "content": "<?xml version=\"1.0\"?><MetaDataObject/>"
+      }
+    },
+    {
+      "writeFile": {
+        "path": "processes.json",
+        "content": [
+          {
+            "Name": "1cv8c.exe",
+            "ProcessId": 4343,
+            "CommandLine": "1cv8c.exe ENTERPRISE /F \"ib-copy\""
+          }
+        ]
+      }
+    }
+  ],
+  "args_extra": [
+    "-V8Path", "{fakePlatform}",
+    "-InfoBasePath", "ib",
+    "-ConfigDir", "src",
+    "-PreflightProcessFile", "processes.json"
+  ],
+  "expect": {
+    "stdoutContains": ["Load completed successfully", "Running:"],
+    "stdoutNotContains": "[preflight] Processes using this file infobase:"
+  },
+  "noSnapshot": "проверяется полное, а не подстрочное сравнение пути"
+}
